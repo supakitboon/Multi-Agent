@@ -5,11 +5,9 @@ Agent generated with [`googleCloudPlatform/agent-starter-pack`](https://github.c
 
 ## SETUP 
 ```
-python3 -m pip install agent-starter
 brew install uv
 uv --version
 uvx agent-starter-pack create AgentTest
-python -version
 python --version
 brew install python@3.13
 brew install google-cloud-sdk
