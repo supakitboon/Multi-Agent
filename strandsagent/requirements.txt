@@ -1,0 +1,8 @@
+strands-agents
+bedrock-agentcore
+boto3
+python-dotenv
+pandas
+scipy
+scikit-learn
+streamlit
