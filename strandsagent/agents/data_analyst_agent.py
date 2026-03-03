@@ -1,10 +1,7 @@
+import json
 import os
 
-from botocore.config import Config
-from strands import Agent, tool
-from strands.models import BedrockModel
-
-_BOTO_CONFIG = Config(read_timeout=300, connect_timeout=60)
+from strands import tool
 
 from tools.csv_tools import upload_csv_to_s3
 from tools.code_interpreter import run_analysis
@@ -16,7 +13,6 @@ from tools.memory_tools import save_analysis
 _ANALYSIS_CODE = """
 import pandas as pd
 import numpy as np
-from scipy import stats
 import json, warnings
 warnings.filterwarnings('ignore')
 
@@ -76,8 +72,6 @@ for col in df.columns:
         nan_actions[col] = {"count": n_missing, "strategy": "mode", "value": str(fill_val)}
 
 # ── 3. NORMALIZATION CHECK ────────────────────────────────────────────────────
-# Heuristic: if a numeric column's range > 100, it likely needs rescaling.
-# Note: "year" columns (e.g. 2000–2024) have range ~24 so won't be caught.
 numeric_cols = df.select_dtypes(include='number').columns.tolist()
 norm_actions = {}
 for col in numeric_cols:
@@ -113,24 +107,6 @@ result = {
 print(json.dumps(result, default=str))
 """
 
-_SYSTEM_PROMPT = """You are a data analysis expert performing a private, thorough analysis.
-
-Your job is to:
-1. Call run_analysis with the CSV content and the provided analysis code
-2. Call upload_csv_to_s3 to persist the raw file for future sessions
-3. Call save_analysis to store the full results in memory
-
-IMPORTANT: Your output is the tutor's private answer key — it will NOT be shown to the student.
-Return a structured JSON-like summary of what you found so the tutor can use it to ask
-guiding questions. Be precise and complete. Include:
-- What the dataset is about (infer from column names)
-- Which columns have data quality issues and what was done
-- Which columns were normalized and why
-- Key statistics (means, medians, distributions)
-- Any outliers worth discussing
-- Strong correlations and what they might imply
-- 3-5 interesting questions a curious student should discover"""
-
 
 @tool
 def analyze_dataset(user_id: str, csv_content: str) -> str:
@@ -142,20 +118,36 @@ def analyze_dataset(user_id: str, csv_content: str) -> str:
         user_id: The student's username (used as storage key).
         csv_content: Raw text content of the uploaded CSV file.
     """
-    agent = Agent(
-        model=BedrockModel(
-            model_id="us.anthropic.claude-sonnet-4-6",
-            region_name=os.environ.get("AWS_REGION", "us-east-2"),
-            boto_client_config=_BOTO_CONFIG,
-        ),
-        system_prompt=_SYSTEM_PROMPT,
-        tools=[run_analysis, upload_csv_to_s3, save_analysis],
-    )
+    import time
+    t0 = time.time()
 
-    prompt = (
-        f"Analyze this CSV for student '{user_id}'. "
-        f"Use this exact code:\n```python\n{_ANALYSIS_CODE}\n```\n\n"
-        f"CSV content:\n{csv_content}"
+    # Step 1: Run the analysis code in the Code Interpreter sandbox
+    print(f"[analyze_dataset] Step 1/3: Running code interpreter...", flush=True)
+    analysis_output = run_analysis(
+        csv_content=csv_content,
+        code=_ANALYSIS_CODE,
     )
+    print(f"[analyze_dataset] Step 1/3 done ({time.time() - t0:.1f}s)", flush=True)
 
-    return str(agent(prompt))
+    # Step 2: Upload the raw CSV to S3 for future sessions
+    print(f"[analyze_dataset] Step 2/3: Uploading CSV to S3...", flush=True)
+    upload_csv_to_s3(
+        user_id=user_id,
+        csv_content=csv_content,
+    )
+    print(f"[analyze_dataset] Step 2/3 done ({time.time() - t0:.1f}s)", flush=True)
+
+    # Step 3: Parse & save the analysis results to memory
+    print(f"[analyze_dataset] Step 3/3: Saving analysis to memory...", flush=True)
+    try:
+        summary = json.loads(analysis_output)
+    except (json.JSONDecodeError, TypeError):
+        summary = {"raw_output": str(analysis_output)}
+
+    save_analysis(
+        username=user_id,
+        summary=summary,
+    )
+    print(f"[analyze_dataset] Step 3/3 done ({time.time() - t0:.1f}s)", flush=True)
+
+    return json.dumps(summary, indent=2, default=str)
