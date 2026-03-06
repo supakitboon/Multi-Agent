@@ -43,7 +43,16 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from agents.tutor_agent import create_tutor
-from tools.csv_tools import dataset_exists
+from tools.csv_tools import dataset_exists, _upload_csv
+
+# NOTE: we used to pre-warm the CodeInterpreter sandbox at import time
+# to shave a few seconds off of the first analysis.  That meant the
+# sandbox started as soon as the web server came up, even if nobody ever
+# asked for an analysis.  To avoid unnecessary infrastructure usage we
+# now start the sandbox lazily inside the tool itself (see
+# tools/code_interpreter.get_warm_session).  The warmup() helper still
+# exists for callers that really want an explicit background start, but
+# the runtime no longer invokes it on startup.
 
 MAX_CSV_SIZE = 10 * 1024 * 1024  # 10 MB
 
@@ -219,12 +228,33 @@ def handler(event: dict, context: object = None) -> dict:
 
         # Trigger logic
         if csv_content:
-            full_prompt = f"USER UPLOADED DATASET:\n{csv_content}\n\nStudent says: {message}"
-        elif not prior_messages and dataset_exists(username):
+            # Upload to S3 immediately — don't send CSV through the LLM
+            _upload_csv(user_id=username, csv_content=csv_content)
+            col_preview = ""
+            try:
+                header_line = csv_content.split("\n", 1)[0].strip()
+                col_preview = f" Columns: {header_line}."
+            except Exception:
+                pass
             full_prompt = (
-                f"[SYSTEM: This student already has a dataset stored from a previous session. "
-                f"Do NOT ask them to upload again — use recall_dataset to retrieve the analysis.]\n\n"
+                f"[SYSTEM: The student just uploaded a CSV dataset. "
+                f"It has been saved to storage.{col_preview}]\n\n"
                 f"Student says: {message}"
+            )
+        elif not prior_messages and dataset_exists(username):
+            # User is starting a new conversation but a dataset already lives
+            # in storage.  We want the agent to both *know* that fact and to
+            # proactively tell the student that their data is still available
+            # (so they don't have to upload again when the page is refreshed).
+            reminder = (
+                "This student already has a dataset stored from a previous session. "
+                "Do NOT ask them to upload again — use recall_dataset to retrieve the analysis. "
+                "Mention in your response that you still have their data and can continue."
+            )
+            safe_message = message or "Hello"
+            full_prompt = (
+                f"[SYSTEM: {reminder}]\n\n"
+                f"Student says: {safe_message}"
             )
         else:
             full_prompt = message

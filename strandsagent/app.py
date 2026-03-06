@@ -10,6 +10,7 @@ load_dotenv(os.path.join(_HERE, ".env"))
 sys.path.insert(0, _HERE)
 
 from runtime.handler import handler  # noqa: E402
+from tools.csv_tools import dataset_exists  # check stored CSV
 
 st.set_page_config(page_title="Data Analysis Tutor", page_icon="📊", layout="centered")
 
@@ -21,6 +22,9 @@ if "logged_in" not in st.session_state:
         "agent_messages": [],
         "chat_display": [],
         "last_uploaded": None,
+        # track whether the user has already been informed about a
+        # previously-uploaded dataset during this browser session
+        "dataset_notified": False,
     })
 
 # ── Helper: Unified Message Processor ─────────────────────────────────────────
@@ -87,8 +91,22 @@ else:
             st.rerun()
 
     # File Uploader - Logic improved to prevent "Tool Sticking"
+    # Let the user know if we already have a stored dataset for them.
+    if st.session_state.logged_in and dataset_exists(st.session_state.username):
+        st.info("✅ You already have a dataset stored — no need to upload again unless you want to replace it.")
     uploaded = st.file_uploader("Upload a CSV dataset", type=["csv"])
     
+    # if the page has just loaded/refreshed and we already have a dataset
+    # for this user, proactively tell the agent so it can remind the student
+    # (only do this once per session).  We don't send any CSV content here –
+    # the handler will detect the stored dataset and the agent will reply.
+    if (not st.session_state.dataset_notified
+            and st.session_state.logged_in
+            and dataset_exists(st.session_state.username)):
+        st.session_state.dataset_notified = True
+        with st.spinner("Checking stored dataset…"):
+            process_interaction(user_input="", display_text="")
+
     if uploaded is not None:
         # Check if this is a NEW file upload
         if uploaded.name != st.session_state.get("last_uploaded"):

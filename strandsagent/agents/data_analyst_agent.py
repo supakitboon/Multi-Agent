@@ -1,153 +1,190 @@
+import io
 import json
-import os
+import time
+import warnings
 
+import numpy as np
+import pandas as pd
 from strands import tool
 
-from tools.csv_tools import upload_csv_to_s3
-from tools.code_interpreter import run_analysis
-from tools.memory_tools import save_analysis
+from tools.memory_tools import _save_analysis
 
-# This code runs in the AgentCore Code Interpreter sandbox.
-# It produces a comprehensive analysis that becomes the tutor's private "answer key".
-# The results are stored in memory but NOT shown verbatim to the student.
-_ANALYSIS_CODE = """
-import pandas as pd
-import numpy as np
-import json, warnings
-warnings.filterwarnings('ignore')
 
-df_raw = pd.read_csv('dataset.csv')
+def _run_analysis(csv_content: str) -> dict:
+    """Run the full analysis locally with pandas — no sandbox needed."""
+    warnings.filterwarnings("ignore")
+    df = pd.read_csv(io.StringIO(csv_content))
 
-# ── 1. PROFILING ──────────────────────────────────────────────────────────────
-profile = {
-    "shape": {"rows": int(df_raw.shape[0]), "columns": int(df_raw.shape[1])},
-    "columns": df_raw.columns.tolist(),
-    "dtypes": df_raw.dtypes.astype(str).to_dict(),
-    "duplicate_rows": int(df_raw.duplicated().sum()),
-}
-
-col_stats = {}
-for col in df_raw.columns:
-    s = df_raw[col]
-    info = {
-        "dtype": str(s.dtype),
-        "missing": int(s.isna().sum()),
-        "missing_pct": round(s.isna().mean() * 100, 2),
-        "unique": int(s.nunique()),
-        "cardinality": "high" if s.nunique() > 50 else "low",
+    # ── 1. PROFILE ────────────────────────────────────────────────────────
+    profile = {
+        "shape": {"rows": int(df.shape[0]), "columns": int(df.shape[1])},
+        "columns": df.columns.tolist(),
+        "dtypes": df.dtypes.astype(str).to_dict(),
+        "duplicate_rows": int(df.duplicated().sum()),
     }
-    if pd.api.types.is_numeric_dtype(s):
-        info.update({
-            "min": float(s.min()), "max": float(s.max()),
-            "mean": float(s.mean()), "median": float(s.median()),
-            "std": float(s.std()), "skewness": float(s.skew()),
-            "kurtosis": float(s.kurtosis()),
-        })
+
+    col_stats = {}
+    for col in df.columns:
+        s = df[col]
+        info = {
+            "dtype": str(s.dtype),
+            "missing": int(s.isna().sum()),
+            "missing_pct": round(s.isna().mean() * 100, 2),
+            "unique": int(s.nunique()),
+            "cardinality": "high" if s.nunique() > 50 else "low",
+        }
+        if pd.api.types.is_numeric_dtype(s):
+            info.update({
+                "min": float(s.min()) if not s.isna().all() else None,
+                "max": float(s.max()) if not s.isna().all() else None,
+                "mean": round(float(s.mean()), 4) if not s.isna().all() else None,
+                "median": float(s.median()) if not s.isna().all() else None,
+                "std": round(float(s.std()), 4) if not s.isna().all() else None,
+                "skewness": round(float(s.skew()), 4) if len(s.dropna()) > 2 else None,
+                "kurtosis": round(float(s.kurtosis()), 4) if len(s.dropna()) > 3 else None,
+            })
+            if not s.isna().all():
+                q1, q3 = s.quantile(0.25), s.quantile(0.75)
+                iqr = q3 - q1
+                info["outlier_count"] = int(((s < q1 - 1.5 * iqr) | (s > q3 + 1.5 * iqr)).sum())
+                info["distribution_shape"] = (
+                    "roughly_normal" if info["skewness"] is not None and abs(info["skewness"]) < 0.5
+                    else ("right_skewed" if (info["skewness"] or 0) > 0 else "left_skewed")
+                )
+        else:
+            info["top_values"] = s.value_counts().head(5).to_dict()
+        col_stats[col] = info
+
+    # ── 2. REMOVE DUPLICATES ─────────────────────────────────────────────
+    preprocessing_steps = []
+    n_before = len(df)
+    df.drop_duplicates(inplace=True)
+    n_removed = n_before - len(df)
+    if n_removed > 0:
+        preprocessing_steps.append(f"Removed {n_removed} duplicate rows")
+
+    # ── 3. CLEAN MISSING VALUES ──────────────────────────────────────────
+    nan_actions = {}
+    for col in list(df.columns):
+        n_missing = int(df[col].isna().sum())
+        if n_missing == 0:
+            continue
+        missing_pct = n_missing / len(df) * 100
+        if missing_pct > 50:
+            df.drop(columns=[col], inplace=True)
+            nan_actions[col] = {"strategy": "drop_column", "reason": f"{missing_pct:.1f}% missing"}
+            preprocessing_steps.append(f"Dropped column '{col}' ({missing_pct:.1f}% missing)")
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            skew = df[col].skew() if len(df[col].dropna()) > 2 else 0
+            if abs(skew) > 1:
+                val = df[col].median()
+                df[col].fillna(val, inplace=True)
+                nan_actions[col] = {"strategy": "median", "value": float(val)}
+                preprocessing_steps.append(f"Filled '{col}' NaNs with median ({val:.4g})")
+            else:
+                val = df[col].mean()
+                df[col].fillna(val, inplace=True)
+                nan_actions[col] = {"strategy": "mean", "value": round(float(val), 4)}
+                preprocessing_steps.append(f"Filled '{col}' NaNs with mean ({val:.4g})")
+        else:
+            val = df[col].mode()[0] if not df[col].mode().empty else "Unknown"
+            df[col].fillna(val, inplace=True)
+            nan_actions[col] = {"strategy": "mode", "value": str(val)}
+            preprocessing_steps.append(f"Filled '{col}' NaNs with mode ('{val}')")
+
+    # ── 4. NORMALIZE NUMERIC COLUMNS ─────────────────────────────────────
+    normalization = {}
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    for col in numeric_cols:
+        s = df[col]
+        col_std = s.std()
+        if col_std == 0:
+            continue
+        col_range = s.max() - s.min()
+        if col_range == 0:
+            continue
+
+        skew = s.skew() if len(s.dropna()) > 2 else 0
         q1, q3 = s.quantile(0.25), s.quantile(0.75)
         iqr = q3 - q1
         outlier_count = int(((s < q1 - 1.5 * iqr) | (s > q3 + 1.5 * iqr)).sum())
-        info["outlier_count"] = outlier_count
-        info["distribution_shape"] = (
-            "roughly_normal" if abs(info["skewness"]) < 0.5
-            else ("right_skewed" if info["skewness"] > 0 else "left_skewed")
-        )
-    else:
-        info["top_values"] = s.value_counts().head(5).to_dict()
-    col_stats[col] = info
+        outlier_pct = outlier_count / len(s) * 100
 
-# ── 2. NaN CLEANING ───────────────────────────────────────────────────────────
-df = df_raw.copy()
-nan_actions = {}
-for col in df.columns:
-    n_missing = int(df[col].isna().sum())
-    if n_missing == 0:
-        continue
-    if pd.api.types.is_numeric_dtype(df[col]):
-        fill_val = df[col].median()
-        df[col].fillna(fill_val, inplace=True)
-        nan_actions[col] = {"count": n_missing, "strategy": "median", "value": float(fill_val)}
-    else:
-        fill_val = df[col].mode()[0] if not df[col].mode().empty else "Unknown"
-        df[col].fillna(fill_val, inplace=True)
-        nan_actions[col] = {"count": n_missing, "strategy": "mode", "value": str(fill_val)}
+        if skew > 1 and (s >= 0).all():
+            method = "log"
+            df[col] = np.log1p(s)
+        elif outlier_pct > 5:
+            method = "robust"
+            median = s.median()
+            df[col] = (s - median) / iqr if iqr != 0 else s
+        elif abs(skew) < 0.5:
+            method = "min-max"
+            df[col] = (s - s.min()) / col_range
+        else:
+            method = "z-score"
+            df[col] = (s - s.mean()) / col_std
 
-# ── 3. NORMALIZATION CHECK ────────────────────────────────────────────────────
-numeric_cols = df.select_dtypes(include='number').columns.tolist()
-norm_actions = {}
-for col in numeric_cols:
-    col_range = df[col].max() - df[col].min()
-    if col_range > 100:
-        col_min, col_max = float(df[col].min()), float(df[col].max())
-        df[col] = (df[col] - col_min) / (col_max - col_min)
-        norm_actions[col] = {"original_min": col_min, "original_max": col_max, "method": "min-max"}
+        normalization[col] = {"method": method}
+        preprocessing_steps.append(f"Normalized '{col}' using {method}")
 
-# ── 4. CORRELATION MATRIX ─────────────────────────────────────────────────────
-corr_info = {}
-if len(numeric_cols) >= 2:
-    corr_matrix = df[numeric_cols].corr().round(3)
-    strong = []
-    for i, c1 in enumerate(numeric_cols):
-        for c2 in numeric_cols[i + 1:]:
-            r = float(corr_matrix.loc[c1, c2])
-            if abs(r) > 0.5:
-                strength = "strong" if abs(r) > 0.8 else "moderate"
-                direction = "positive" if r > 0 else "negative"
-                strong.append({"col_a": c1, "col_b": c2, "r": r, "strength": strength, "direction": direction})
-    corr_info["strong_correlations"] = strong
+    # ── 5. CORRELATIONS ──────────────────────────────────────────────────
+    numeric_cols = df.select_dtypes(include="number").columns.tolist()
+    strong_correlations = []
+    if len(numeric_cols) >= 2:
+        corr = df[numeric_cols].corr().round(4)
+        for i, c1 in enumerate(numeric_cols):
+            for c2 in numeric_cols[i + 1:]:
+                r = float(corr.loc[c1, c2])
+                if abs(r) > 0.5:
+                    strength = "strong" if abs(r) > 0.8 else "moderate"
+                    direction = "positive" if r > 0 else "negative"
+                    strong_correlations.append({
+                        "col_a": c1, "col_b": c2,
+                        "r": r, "strength": strength, "direction": direction,
+                    })
 
-# ── OUTPUT ────────────────────────────────────────────────────────────────────
-result = {
-    "profile": profile,
-    "column_stats": col_stats,
-    "nan_cleaning": nan_actions,
-    "normalization": norm_actions,
-    "correlations": corr_info,
-    "cleaned_sample": df.head(3).to_dict(orient='records'),
-}
-print(json.dumps(result, default=str))
-"""
+    # ── 6. CLEANED SUMMARY ───────────────────────────────────────────────
+    cleaned_summary = {
+        "shape": {"rows": int(df.shape[0]), "columns": int(df.shape[1])},
+        "columns": df.columns.tolist(),
+        "dtypes": df.dtypes.astype(str).to_dict(),
+        "missing_total": int(df.isna().sum().sum()),
+        "sample_rows": df.head(3).to_dict(orient="records"),
+    }
+
+    return {
+        "profile": {**profile, "column_stats": col_stats},
+        "preprocessing_steps": preprocessing_steps,
+        "nan_cleaning": nan_actions,
+        "normalization": normalization,
+        "correlations": strong_correlations,
+        "cleaned_summary": cleaned_summary,
+    }
+
+
+def _analyze_dataset(user_id: str, csv_content: str) -> str:
+    """Plain helper: run analysis and save results."""
+    t0 = time.time()
+
+    print("[analyze_dataset] Running analysis...", flush=True)
+    summary = _run_analysis(csv_content)
+    print(f"[analyze_dataset] Analysis done ({time.time() - t0:.1f}s)", flush=True)
+
+    print("[analyze_dataset] Saving results...", flush=True)
+    _save_analysis(username=user_id, summary=summary)
+    print(f"[analyze_dataset] Done ({time.time() - t0:.1f}s)", flush=True)
+
+    return json.dumps(summary, indent=2, default=str)
 
 
 @tool
 def analyze_dataset(user_id: str, csv_content: str) -> str:
     """
-    Run a comprehensive expert analysis on the CSV, persist the results,
-    and return a structured summary for the tutor's internal use only.
+    Run a comprehensive analysis on the CSV locally with pandas.
+    Results are stored in memory for the tutor.
 
     Args:
         user_id: The student's username (used as storage key).
         csv_content: Raw text content of the uploaded CSV file.
     """
-    import time
-    t0 = time.time()
-
-    # Step 1: Run the analysis code in the Code Interpreter sandbox
-    print(f"[analyze_dataset] Step 1/3: Running code interpreter...", flush=True)
-    analysis_output = run_analysis(
-        csv_content=csv_content,
-        code=_ANALYSIS_CODE,
-    )
-    print(f"[analyze_dataset] Step 1/3 done ({time.time() - t0:.1f}s)", flush=True)
-
-    # Step 2: Upload the raw CSV to S3 for future sessions
-    print(f"[analyze_dataset] Step 2/3: Uploading CSV to S3...", flush=True)
-    upload_csv_to_s3(
-        user_id=user_id,
-        csv_content=csv_content,
-    )
-    print(f"[analyze_dataset] Step 2/3 done ({time.time() - t0:.1f}s)", flush=True)
-
-    # Step 3: Parse & save the analysis results to memory
-    print(f"[analyze_dataset] Step 3/3: Saving analysis to memory...", flush=True)
-    try:
-        summary = json.loads(analysis_output)
-    except (json.JSONDecodeError, TypeError):
-        summary = {"raw_output": str(analysis_output)}
-
-    save_analysis(
-        username=user_id,
-        summary=summary,
-    )
-    print(f"[analyze_dataset] Step 3/3 done ({time.time() - t0:.1f}s)", flush=True)
-
-    return json.dumps(summary, indent=2, default=str)
+    return _analyze_dataset(user_id, csv_content)

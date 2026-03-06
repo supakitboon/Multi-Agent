@@ -6,10 +6,10 @@ from strands.models import BedrockModel
 
 _BOTO_CONFIG = Config(read_timeout=300, connect_timeout=60)
 
-from agents.data_analyst_agent import analyze_dataset
-from agents.fact_checker_agent import fact_check_claim
-from tools.csv_tools import dataset_exists
-from tools.memory_tools import get_analysis
+from agents.data_analyst_agent import _analyze_dataset
+from agents.fact_checker_agent import _fact_check_claim
+from tools.csv_tools import dataset_exists, _download_csv
+from tools.memory_tools import _get_analysis
 
 _SYSTEM_PROMPT = """You are a Socratic data analysis tutor. Your job is to help students
 DISCOVER insights themselves — not to hand them answers.
@@ -21,13 +21,13 @@ find the answer themselves. Think of yourself as a coach, not a textbook.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 ## When a student uploads a CSV
-1. Call upload_and_analyze — this runs a full expert analysis and stores it privately
-2. Do NOT show the student the results
-3. Instead, welcome them and ask an opening question to get them observing:
-   - "I've processed your dataset. Before we dive in — just from looking at the
+The dataset is already saved automatically. Just welcome them and ask an
+opening question to get them curious:
+   - "I've saved your dataset. Before we dive in — just from looking at the
      column names, what do you think this data is tracking? What story might it tell?"
-   - OR: "Great, I've loaded your data. What's the first thing you'd want to know
+   - OR: "Great, I've stored your data. What's the first thing you'd want to know
      about it? What question would you start with?"
+Do NOT run analysis yet — wait until the student asks about the data.
 
 ## When a student's question is vague or broad
 Examples: "analyze this", "what do you see?", "tell me about the data", "help me"
@@ -45,10 +45,19 @@ interests you most?
 
 What sounds most interesting to you?"
 
+## When a student asks to analyze or explore the data
+Examples: "analyze this", "profile my data", "what does the data look like?"
+
+1. Call run_analysis — this retrieves the CSV from storage, runs a full
+   expert analysis, and stores the results privately
+2. Do NOT share the raw results with the student
+3. Use the analysis to guide the student with Socratic questions
+
 ## When a student makes a specific observation or claim
 Examples: "I think the average age is around 30", "column X seems skewed"
 
-1. Call check_claim to verify it against the real data
+1. If no analysis has been run yet, call run_analysis first
+2. Call check_claim to verify it against the real data
 2. If the student is CORRECT:
    - Confirm without giving away other details: "You're right about that!
      What made you think it might be around that value? What would that tell us?"
@@ -72,8 +81,11 @@ Examples: "what is the mean of column X?", "which column has the most missing da
 Ask them to upload a CSV and prime their curiosity:
 "Upload a CSV file and we'll start exploring it together! I'll ask you
 questions to help you think like a data analyst."
-
-## Teaching tone
+## When a student returns and a dataset already exists
+If the conversation restarts (e.g. the web page is refreshed) and you know
+there's a previously uploaded file, proactively mention that you still have
+the data stored and can continue immediately.  This reminder helps avoid
+unnecessary re-uploads.## Teaching tone
 - Ask one question at a time — don't overwhelm
 - Celebrate good observations, even partial ones
 - When a student is stuck, give a small hint, not the full answer
@@ -104,13 +116,16 @@ def create_tutor(username: str, prior_messages: list | None = None) -> Agent:
     from strands import tool as strands_tool
 
     @strands_tool
-    def upload_and_analyze(csv_content: str) -> str:
+    def run_analysis() -> str:
         """
-        Run a comprehensive analysis on the student's uploaded CSV and store
-        the results privately. Returns an internal summary for tutor use only
-        — do NOT share these results directly with the student.
+        Retrieve the student's CSV from S3 and run a comprehensive analysis.
+        Stores results privately. Returns an internal summary for tutor use
+        only — do NOT share these results directly with the student.
+        Call this when the student asks about analysis, profiling, or data
+        exploration — NOT during upload.
         """
-        return analyze_dataset(user_id=username, csv_content=csv_content)
+        csv_content = _download_csv(username)
+        return _analyze_dataset(user_id=username, csv_content=csv_content)
 
     @strands_tool
     def check_claim(student_claim: str) -> str:
@@ -119,7 +134,7 @@ def create_tutor(username: str, prior_messages: list | None = None) -> Agent:
         Returns the factual result for tutor use — do NOT reveal it verbatim;
         use it to guide the student with questions.
         """
-        return fact_check_claim(user_id=username, student_claim=student_claim)
+        return _fact_check_claim(user_id=username, student_claim=student_claim)
 
     @strands_tool
     def recall_dataset() -> str:
@@ -128,7 +143,7 @@ def create_tutor(username: str, prior_messages: list | None = None) -> Agent:
         Returns internal data for tutor use only — guide the student toward
         these insights rather than stating them directly.
         """
-        return get_analysis(username)
+        return _get_analysis(username)
 
     @strands_tool
     def has_dataset() -> str:
@@ -142,7 +157,7 @@ def create_tutor(username: str, prior_messages: list | None = None) -> Agent:
             boto_client_config=_BOTO_CONFIG,
         ),
         system_prompt=_SYSTEM_PROMPT,
-        tools=[upload_and_analyze, check_claim, recall_dataset, has_dataset],
+        tools=[run_analysis, check_claim, recall_dataset, has_dataset],
     )
 
     # Restore prior conversation turns so the agent has context across

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import boto3
 from strands import tool
 
-AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
+AWS_REGION = os.environ.get("AWS_REGION", "us-east-2")
 MEMORY_ID = os.environ.get("AGENTCORE_MEMORY_ID", "")
 
 _client = None
@@ -18,6 +18,51 @@ def _get_client():
     return _client
 
 
+def _save_analysis(username: str, summary: dict) -> str:
+    """Plain helper: persist analysis summary to AgentCore Memory."""
+    _get_client().create_event(
+        memoryId=MEMORY_ID,
+        actorId=username,
+        sessionId=f"{username}-analysis",
+        eventTimestamp=datetime.now(timezone.utc),
+        payload=[
+            {
+                "conversational": {
+                    "content": {"text": json.dumps(summary)},
+                    "role": "TOOL",
+                }
+            }
+        ],
+        metadata={
+            "type": {"stringValue": "dataset_analysis"},
+            "userId": {"stringValue": username},
+        },
+    )
+    return "Analysis saved successfully."
+
+
+def _get_analysis(username: str) -> str:
+    """Plain helper: retrieve most recent analysis summary."""
+    response = _get_client().retrieve_memory_records(
+        memoryId=MEMORY_ID,
+        namespace=username,
+        searchCriteria={
+            "searchQuery": f"dataset analysis for {username}",
+        },
+    )
+    records = response.get("memoryRecords", [])
+    if not records:
+        return "No prior analysis found for this user."
+
+    latest = records[0]
+    content = latest.get("content", {})
+    # Handle both old string format and new structured format
+    if isinstance(content, str):
+        return content
+    text = content.get("text", "")
+    return text if text else json.dumps(content)
+
+
 @tool
 def save_analysis(username: str, summary: dict) -> str:
     """Persist a dataset analysis summary to AgentCore Memory keyed by username.
@@ -26,16 +71,7 @@ def save_analysis(username: str, summary: dict) -> str:
         username: The student's username used as the storage key.
         summary: The analysis results dict to store.
     """
-    _get_client().create_event(
-        memoryId=MEMORY_ID,
-        event={
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "type": "dataset_analysis",
-            "userId": username,
-            "content": json.dumps(summary),
-        },
-    )
-    return "Analysis saved successfully."
+    return _save_analysis(username, summary)
 
 
 @tool
@@ -46,14 +82,4 @@ def get_analysis(username: str) -> str:
     Args:
         username: The student's username used as the storage key.
     """
-    response = _get_client().retrieve_memory_records(
-        memoryId=MEMORY_ID,
-        query=f"dataset analysis for username {username}",
-    )
-    records = response.get("memoryRecords", [])
-    if not records:
-        return "No prior analysis found for this user."
-
-    latest = records[0]
-    content = latest.get("content", "{}")
-    return content
+    return _get_analysis(username)
