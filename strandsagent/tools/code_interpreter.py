@@ -9,16 +9,18 @@ AWS_REGION = os.environ.get("AWS_REGION", "us-east-2")
 
 
 class CodeInterpreterSession:
-    """A reusable Code Interpreter sandbox session.
+    """A Code Interpreter sandbox session.
 
     Use as a context manager to keep the sandbox alive across multiple
-    code executions (e.g. profile -> clean -> normalize).
+    code executions (e.g. profile -> clean -> normalize), or set
+    auto_close=True to stop the sandbox after each code run (cost-saving).
     """
 
-    def __init__(self):
+    def __init__(self, auto_close: bool = False):
         self._client = CodeInterpreter(AWS_REGION)
         self._started = False
         self._t0 = None
+        self._auto_close = auto_close
 
     def __enter__(self):
         self.start()
@@ -61,7 +63,13 @@ class CodeInterpreterSession:
         for item in result.get("output", []):
             if item.get("type") == "text":
                 outputs.append(item.get("text", ""))
-        return "\n".join(outputs) if outputs else "(no output)"
+        output_text = "\n".join(outputs) if outputs else "(no output)"
+        
+        # auto-close if requested (cost optimization)
+        if self._auto_close:
+            self.stop()
+        
+        return output_text
 
 
 # ---------------------------------------------------------------------------
@@ -116,8 +124,11 @@ def run_analysis(csv_content: str, code: str) -> str:
     Upload csv_content to an AgentCore Code Interpreter sandbox, execute
     the provided pandas code, and return the combined stdout output.
 
-    Uses a warm reusable sandbox to avoid cold-start latency.
+    Starts a fresh sandbox for each call and closes it after execution
+    (cost-optimized). For multi-step workflows that need session persistence,
+    use CodeInterpreterSession(auto_close=False) directly.
     """
-    session = get_warm_session()
+    session = CodeInterpreterSession(auto_close=True)
+    session.start()
     session.upload_csv(csv_content)
     return session.run_code(code)

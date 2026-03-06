@@ -7,6 +7,7 @@ from strands.models import BedrockModel
 
 _BOTO_CONFIG = Config(read_timeout=300, connect_timeout=60)
 
+from agents.data_analyst_agent import _smart_analyze_dataset
 from tools.csv_tools import _download_csv
 from tools.memory_tools import _get_analysis
 
@@ -32,18 +33,27 @@ def _fact_check_claim(user_id: str, student_claim: str) -> str:
 
     # Pre-fetch everything before calling the LLM — no tool calls needed
     try:
-        analysis = _get_analysis(user_id)
-        print(f"[fact_check] Got analysis for '{user_id}': {len(analysis)} chars", flush=True)
-    except Exception as e:
-        print(f"[fact_check] ERROR retrieving analysis: {e}", flush=True)
-        return f"Error retrieving analysis: {e}"
-
-    try:
         csv_content = _download_csv(user_id)
         print(f"[fact_check] Got CSV for '{user_id}': {len(csv_content)} chars", flush=True)
     except Exception as e:
         print(f"[fact_check] ERROR downloading CSV: {e}", flush=True)
         return f"Error downloading CSV: {e}"
+
+    # Try to get existing analysis; if none exists, run smart analysis on demand
+    analysis = None
+    try:
+        analysis = _get_analysis(user_id)
+        print(f"[fact_check] Got existing analysis for '{user_id}': {len(analysis)} chars", flush=True)
+    except Exception:
+        print(f"[fact_check] No existing analysis found for '{user_id}', running smart analysis...", flush=True)
+
+    if not analysis:
+        try:
+            analysis = _smart_analyze_dataset(user_id, csv_content)
+            print(f"[fact_check] Smart analysis complete: {len(analysis)} chars", flush=True)
+        except Exception as e:
+            print(f"[fact_check] ERROR in smart analysis: {e}", flush=True)
+            return f"Error running analysis: {e}"
 
     # Build a concise data preview (full data is too large for the prompt)
     try:

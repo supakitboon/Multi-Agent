@@ -6,7 +6,7 @@ from strands.models import BedrockModel
 
 _BOTO_CONFIG = Config(read_timeout=300, connect_timeout=60)
 
-from agents.data_analyst_agent import _analyze_dataset
+from agents.data_analyst_agent import _analyze_dataset, _smart_analyze_dataset
 from agents.fact_checker_agent import _fact_check_claim
 from tools.csv_tools import dataset_exists, _download_csv
 from tools.memory_tools import _get_analysis
@@ -118,14 +118,26 @@ def create_tutor(username: str, prior_messages: list | None = None) -> Agent:
     @strands_tool
     def run_analysis() -> str:
         """
-        Retrieve the student's CSV from S3 and run a comprehensive analysis.
-        Stores results privately. Returns an internal summary for tutor use
-        only — do NOT share these results directly with the student.
-        Call this when the student asks about analysis, profiling, or data
-        exploration — NOT during upload.
+        Retrieve the student's CSV from S3 and run a comprehensive deterministic
+        analysis (runs ALL steps). Stores results privately. Returns an internal
+        summary for tutor use only — do NOT share these results directly with
+        the student. Use this as the default when the student asks about
+        analysis, profiling, or data exploration — NOT during upload.
         """
         csv_content = _download_csv(username)
         return _analyze_dataset(user_id=username, csv_content=csv_content)
+
+    @strands_tool
+    def run_smart_analysis() -> str:
+        """
+        Retrieve the student's CSV from S3 and run an LLM-powered smart analysis.
+        The LLM examines the dataset and decides which analysis steps are relevant
+        (e.g., skip correlations if only 1 numeric column). Use this instead of
+        run_analysis when you want a targeted, context-aware analysis rather than
+        running every step. Results are stored privately for tutor use only.
+        """
+        csv_content = _download_csv(username)
+        return _smart_analyze_dataset(user_id=username, csv_content=csv_content)
 
     @strands_tool
     def check_claim(student_claim: str) -> str:
@@ -157,7 +169,7 @@ def create_tutor(username: str, prior_messages: list | None = None) -> Agent:
             boto_client_config=_BOTO_CONFIG,
         ),
         system_prompt=_SYSTEM_PROMPT,
-        tools=[run_analysis, check_claim, recall_dataset, has_dataset],
+        tools=[run_analysis, run_smart_analysis, check_claim, recall_dataset, has_dataset],
     )
 
     # Restore prior conversation turns so the agent has context across
