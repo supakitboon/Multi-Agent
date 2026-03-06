@@ -52,6 +52,54 @@ The system is composed of four layers:
 
 ---
 
+## 🗺️ System Architecture Diagram
+
+```mermaid
+flowchart TB
+    subgraph UI["Frontend (Streamlit)"]
+        APP["app.py<br/>- Login / Session Mgmt<br/>- CSV Upload<br/>- Chat Interface"]
+    end
+    subgraph RUNTIME["Runtime Layer"]
+        HANDLER["handler.py<br/>- Parse CSV (raw/base64/multipart)<br/>- Restore conversation history<br/>- Route to Tutor Agent"]
+    end
+    subgraph AGENTS["Agent Layer (Strands Framework)"]
+        TUTOR["Tutor Agent<br/>(Orchestrator)<br/>Claude Sonnet 4.6"]
+        DATA["Data Analyst Agent<br/>(Local Pandas processing)"]
+        FACT["Fact Checker Agent<br/>Claude Sonnet 4.6"]
+    end
+    subgraph TOOLS["Tool Layer"]
+        CSV_TOOLS["csv_tools.py<br/>upload / download / exists"]
+        MEM_TOOLS["memory_tools.py<br/>save / get analysis"]
+        CODE_INTERP["code_interpreter.py<br/>CodeInterpreterSession"]
+        PREPROC["preprocessing_tools.py<br/>8 data processing tools"]
+    end
+    subgraph AWS["AWS Cloud Services"]
+        BEDROCK["AWS Bedrock<br/>Claude Sonnet 4.6 LLM"]
+        S3["AWS S3<br/>datasets/{user_id}/dataset.csv"]
+        AGENTCORE_MEM["AWS AgentCore<br/>Memory Service"]
+        AGENTCORE_CODE["AWS AgentCore<br/>Code Interpreter Sandbox"]
+    end
+    APP -->|"process_interaction()"| HANDLER
+    HANDLER -->|"create_tutor(username, messages)"| TUTOR
+    TUTOR -->|"run_analysis()"| DATA
+    TUTOR -->|"check_claim()"| FACT
+    TUTOR -->|"recall_dataset()"| MEM_TOOLS
+    TUTOR -->|"has_dataset()"| CSV_TOOLS
+    DATA -->|"profile & preprocess"| PREPROC
+    DATA -->|"save results"| MEM_TOOLS
+    FACT -->|"fetch stored analysis"| MEM_TOOLS
+    FACT -->|"fetch raw CSV"| CSV_TOOLS
+    FACT -->|"LLM verification call"| BEDROCK
+    CSV_TOOLS -->|"boto3 put/get/head_object"| S3
+    MEM_TOOLS -->|"create_event / retrieve"| AGENTCORE_MEM
+    CODE_INTERP -->|"spawn sandbox"| AGENTCORE_CODE
+    PREPROC -->|"execute python"| CODE_INTERP
+    TUTOR -->|"Strands Agent LLM calls"| BEDROCK
+    HANDLER -->|"upload CSV on receive"| CSV_TOOLS
+```
+
+---
+
 ## 🔄 Key Flows
 
 ### CSV Upload & Analysis
@@ -149,3 +197,6 @@ streamlit run app.py
 
 ---
 
+## 📄 License
+
+MIT License — see [LICENSE](LICENSE) for details.
