@@ -13,7 +13,7 @@ sys.path.insert(0, _HERE)
 
 from runtime.handler import handler  # noqa: E402
 from tools.csv_tools import dataset_exists  # check stored CSV
-from tools.chat_storage import save_chat, load_chat, list_chats  # noqa: E402
+from tools.chat_storage import save_chat, load_chat, list_chats, delete_chat  # noqa: E402
 
 st.set_page_config(page_title="Data Analysis Tutor", page_icon="📊", layout="centered")
 
@@ -95,6 +95,12 @@ def _auto_save():
     ss = st.session_state
     if not ss.get("current_chat_id") or not ss.get("chat_display"):
         return
+    
+    # Only save if there are actual user messages (not just system/dataset notifications)
+    has_user_messages = any(msg.get("role") == "user" for msg in ss.chat_display)
+    if not has_user_messages:
+        return
+    
     try:
         save_chat(
             username=ss.username,
@@ -175,12 +181,27 @@ else:
             cid = chat_meta["chat_id"]
             label = chat_meta["title"]
             is_active = cid == st.session_state.current_chat_id
-            btn_type = "primary" if is_active else "secondary"
-            if st.button(label, key=f"chat_{cid}", use_container_width=True, type=btn_type):
-                if not is_active:
-                    _auto_save()
-                    _load_existing_chat(cid)
-                    st.rerun()
+            
+            # Use columns for chat button and delete button
+            col1, col2 = st.columns([4, 1])
+            with col1:
+                btn_type = "primary" if is_active else "secondary"
+                if st.button(label, key=f"chat_{cid}", use_container_width=True, type=btn_type):
+                    if not is_active:
+                        _auto_save()
+                        _load_existing_chat(cid)
+                        st.rerun()
+            with col2:
+                if st.button("x", key=f"delete_{cid}", help=f"Delete chat: {label}"):
+                    try:
+                        delete_chat(st.session_state.username, cid)
+                        st.session_state.chat_list_loaded = False  # refresh the list
+                        # If we deleted the current chat, start a new one
+                        if is_active:
+                            _start_new_chat()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Failed to delete chat: {e}")
 
     # ── Main Area ──
     col1, col2 = st.columns([5, 1])
