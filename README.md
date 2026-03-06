@@ -195,8 +195,3 @@ streamlit run app.py
 - CSV files are capped at **10MB**
 - Code execution runs in an **isolated AgentCore sandbox** — no access to the host environment
 
----
-
-## 📄 License
-
-MIT License — see [LICENSE](LICENSE) for details.
