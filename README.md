@@ -1,17 +1,25 @@
-# 📊 Strands Agent — AI-Powered Data Tutoring System
+# 📊 Strands Agent — AI-Powered Data Tutoring & Planning System
 
-An intelligent tutoring system that teaches students data analysis through Socratic dialogue. Powered by AWS Bedrock (Claude Sonnet 4.6), the agent guides students to discover insights from their own datasets rather than simply giving answers.
+An intelligent tutoring system that teaches students data analysis through Socratic dialogue **and** helps them plan data analysis projects with personalized learning paths. Powered by AWS Bedrock (Claude Sonnet 4.6), the multi-agent system guides students to discover insights from their own datasets rather than simply giving answers.
 
 ---
 
 ## 🧠 How It Works
 
-Students upload a CSV file and chat with a Tutor Agent that:
+Students can switch between two agents via a dropdown in the UI:
+
+**📊 Tutor Agent** — Upload a CSV file and chat with an AI tutor that:
 - Analyzes their dataset automatically (deterministic or LLM-powered)
 - Asks Socratic questions to guide their thinking
 - Fact-checks claims students make about their data
 - Remembers previous sessions so learning can continue across logins
 - Persists chat history so students can revisit past conversations
+
+**📋 Planner Agent** — Get help planning a data analysis project:
+- Interviews the student about their project, skills, timeline, and goals
+- Creates a week-by-week project plan with milestones
+- Generates a personalized learning path for missing skills
+- Saves and recalls plans across sessions via AgentCore Memory
 
 ---
 
@@ -23,7 +31,7 @@ The system is composed of four layers:
 - `app.py` — handles login/session management, CSV upload, chat interface, and chat history sidebar (load/delete past conversations)
 
 ### 2. Runtime Layer
-- `runtime/handler.py` — parses incoming CSV (raw, base64, or multipart), restores conversation history, and routes requests to the Tutor Agent
+- `runtime/handler.py` — parses incoming CSV (raw, base64, or multipart), restores conversation history, and routes requests to the appropriate agent (Tutor or Planner) based on the `agentType` field
 
 ### 3. Agent Layer (Strands Framework)
 | Agent | Role | Model |
@@ -32,13 +40,14 @@ The system is composed of four layers:
 | **Data Analyst** (Deterministic path) | Runs ALL 6 Pandas analysis steps — no LLM | — |
 | **Data Analyst** (Smart path) | LLM decides which analysis steps are relevant | Claude Sonnet 4.6 |
 | **Fact Checker Agent** | Verifies student claims against actual data | Claude Sonnet 4.6 |
+| **Planner Agent** | Interviews student & creates project plan + learning path | Claude Sonnet 4.6 |
 
 ### 4. Tool Layer
 | Tool | Responsibility |
 |---|---|
 | `csv_tools.py` | Upload / download / check existence of CSV in S3 |
 | `chat_storage.py` | Save, load, list, and delete chat history in S3 |
-| `memory_tools.py` | Save and retrieve dataset analysis summaries via AgentCore Memory |
+| `memory_tools.py` | Save and retrieve dataset analysis summaries and project plans via AgentCore Memory |
 | `code_interpreter.py` | Spawn sandboxed Python execution sessions via AgentCore |
 | `preprocessing_tools.py` | 8 data processing utilities (clean, profile, normalize, encode, etc.) |
 
@@ -50,12 +59,48 @@ The system is composed of four layers:
 |---|---|
 | **AWS Bedrock** | LLM inference using `us.anthropic.claude-sonnet-4-6` |
 | **AWS S3** | Stores raw CSV files at `datasets/{user_id}/dataset.csv` and chat history at `chats/{username}/{chat_id}.json` (CSV max 10 MB) |
-| **AWS AgentCore Memory** | Persists dataset analysis summaries per user (namespace: `{username}`) |
+| **AWS AgentCore Memory** | Persists dataset analysis summaries and project plans per user (namespace: `{username}`) |
 | **AWS AgentCore Code Interpreter** | Sandboxed environment for executing Pandas/NumPy/SciPy code |
 
 ---
 
-## 🗺️ System Architecture Diagram
+## � Installation
+
+1. Clone the repository:
+   ```bash
+   git clone <repository-url>
+   cd Multi-Agent
+   ```
+
+2. Navigate to the project directory and install dependencies:
+   ```bash
+   cd strandsagent
+   pip install -r requirements.txt
+   ```
+
+## ⚙️ Setup
+
+1. Create a `.env` file in the `strandsagent/` directory with your AWS credentials and configuration:
+   ```
+   AWS_ACCESS_KEY_ID=your_access_key_id
+   AWS_SECRET_ACCESS_KEY=your_secret_access_key
+   AWS_DEFAULT_REGION=us-east-1
+   ```
+
+2. Ensure you have access to AWS Bedrock with the `us.anthropic.claude-sonnet-4-6` model, and the necessary permissions for S3 and AgentCore services.
+
+## ▶️ Running the Application
+
+From the `strandsagent/` directory, run:
+```bash
+streamlit run app.py
+```
+
+Open the provided local URL in your browser to access the application.
+
+---
+
+## �🗺️ System Architecture Diagram
 
 ```mermaid
 flowchart TB
@@ -85,6 +130,7 @@ flowchart TB
         end
 
         FACT["🔍 Fact Checker Agent\nClaude Sonnet 4.6"]
+        PLANNER["📋 Planner Agent\nProject Plan · Learning Path\nClaude Sonnet 4.6"]
     end
 
     subgraph PANDAS_OPS["🐼  Pandas Analysis Steps"]
@@ -110,7 +156,8 @@ flowchart TB
 
     %% Main flow
     APP -->|"process_interaction()"| HANDLER
-    HANDLER -->|"create_tutor()"| TUTOR
+    HANDLER -->|"agentType=tutor"| TUTOR
+    HANDLER -->|"agentType=planner"| PLANNER
 
     %% Tutor delegates
     TUTOR -->|"run_analysis()"| DETERM
@@ -134,6 +181,10 @@ flowchart TB
     FACT -->|"fetch CSV"| CSV_TOOLS
     FACT -->|"verify claim"| BEDROCK
 
+    %% Planner agent
+    PLANNER -->|"save_plan · recall_plan"| MEM_TOOLS
+    PLANNER -->|"LLM calls"| BEDROCK
+
     %% Tools to AWS
     CSV_TOOLS -->|"put/get/head"| S3
     CHAT_STORE -->|"put/get/list/delete"| S3
@@ -146,7 +197,7 @@ flowchart TB
     %% Styles
     class APP frontend
     class HANDLER runtime
-    class TUTOR,FACT agent
+    class TUTOR,FACT,PLANNER agent
     class DETERM determin
     class SMART smart
     class CSV_TOOLS,CHAT_STORE,MEM_TOOLS,CODE_INTERP,PREPROC tool
@@ -185,6 +236,13 @@ flowchart TB
 3. Tutor retrieves previous analysis from AgentCore Memory via `recall_dataset()`
 4. Dialogue resumes from where it left off
 
+### Project Planning & Learning Path
+1. Student switches to the Planner Agent via the dropdown
+2. Planner interviews the student about their project topic, experience level, timeline, and goals
+3. Planner creates a week-by-week project plan with milestones and a personalized learning path for missing skills
+4. Plan is saved to AgentCore Memory via `save_plan()`
+5. When the student returns, the handler detects the existing plan and the agent offers to continue or start fresh
+
 ### Chat History Persistence
 1. Each conversation is auto-saved to S3 at `chats/{username}/{chat_id}.json`
 2. Students can load or delete past chats from the sidebar
@@ -204,6 +262,7 @@ strandsagent/
 ├── agents/
 │   ├── __init__.py
 │   ├── tutor_agent.py              # Tutor Agent (orchestrator)
+│   ├── planner_agent.py            # Planner Agent (project plan + learning path)
 │   ├── data_analyst_agent.py       # Data Analyst (deterministic + smart paths)
 │   └── fact_checker_agent.py       # Fact Checker Agent
 └── tools/
