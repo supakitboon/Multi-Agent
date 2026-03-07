@@ -7,10 +7,11 @@ An intelligent tutoring system that teaches students data analysis through Socra
 ## 🧠 How It Works
 
 Students upload a CSV file and chat with a Tutor Agent that:
-- Analyzes their dataset automatically
+- Analyzes their dataset automatically (deterministic or LLM-powered)
 - Asks Socratic questions to guide their thinking
 - Fact-checks claims students make about their data
 - Remembers previous sessions so learning can continue across logins
+- Persists chat history so students can revisit past conversations
 
 ---
 
@@ -19,25 +20,27 @@ Students upload a CSV file and chat with a Tutor Agent that:
 The system is composed of four layers:
 
 ### 1. Frontend (Streamlit)
-- `app.py` — handles login/session management, CSV upload, and the chat interface
+- `app.py` — handles login/session management, CSV upload, chat interface, and chat history sidebar (load/delete past conversations)
 
 ### 2. Runtime Layer
-- `handler.py` — parses incoming CSV (raw, base64, or multipart), restores conversation history, and routes requests to the Tutor Agent
+- `runtime/handler.py` — parses incoming CSV (raw, base64, or multipart), restores conversation history, and routes requests to the Tutor Agent
 
 ### 3. Agent Layer (Strands Framework)
 | Agent | Role | Model |
 |---|---|---|
 | **Tutor Agent** | Orchestrator — drives Socratic dialogue | Claude Sonnet 4.6 |
-| **Data Analyst Agent** | Profiles and preprocesses CSV data locally via Pandas | — |
+| **Data Analyst** (Deterministic path) | Runs ALL 6 Pandas analysis steps — no LLM | — |
+| **Data Analyst** (Smart path) | LLM decides which analysis steps are relevant | Claude Sonnet 4.6 |
 | **Fact Checker Agent** | Verifies student claims against actual data | Claude Sonnet 4.6 |
 
 ### 4. Tool Layer
 | Tool | Responsibility |
 |---|---|
 | `csv_tools.py` | Upload / download / check existence of CSV in S3 |
-| `memory_tools.py` | Save and retrieve dataset analysis summaries |
-| `code_interpreter.py` | Spawn sandboxed Python execution sessions |
-| `preprocessing_tools.py` | 8 data processing utilities (clean, profile, correlate, etc.) |
+| `chat_storage.py` | Save, load, list, and delete chat history in S3 |
+| `memory_tools.py` | Save and retrieve dataset analysis summaries via AgentCore Memory |
+| `code_interpreter.py` | Spawn sandboxed Python execution sessions via AgentCore |
+| `preprocessing_tools.py` | 8 data processing utilities (clean, profile, normalize, encode, etc.) |
 
 ---
 
@@ -45,8 +48,8 @@ The system is composed of four layers:
 
 | Service | Usage |
 |---|---|
-| **AWS Bedrock** | LLM inference using `claude-sonnet-4-6` |
-| **AWS S3** | Stores raw CSV files at `datasets/{user_id}/dataset.csv` (max 10MB) |
+| **AWS Bedrock** | LLM inference using `us.anthropic.claude-sonnet-4-6` |
+| **AWS S3** | Stores raw CSV files at `datasets/{user_id}/dataset.csv` and chat history at `chats/{username}/{chat_id}.json` (CSV max 10 MB) |
 | **AWS AgentCore Memory** | Persists dataset analysis summaries per user (namespace: `{username}`) |
 | **AWS AgentCore Code Interpreter** | Sandboxed environment for executing Pandas/NumPy/SciPy code |
 
@@ -92,6 +95,7 @@ flowchart TB
 
     subgraph TOOLS["🛠️  Tool Layer"]
         CSV_TOOLS["csv_tools.py\nupload · download · exists"]
+        CHAT_STORE["chat_storage.py\nsave · load · list · delete"]
         MEM_TOOLS["memory_tools.py\nsave · get analysis"]
         CODE_INTERP["code_interpreter.py\nCodeInterpreterSession"]
         PREPROC["preprocessing_tools.py\n8 processing tools"]
@@ -99,7 +103,7 @@ flowchart TB
 
     subgraph AWS["☁️  AWS Cloud Services"]
         BEDROCK["⚡ AWS Bedrock\nClaude Sonnet 4.6"]
-        S3["🪣 AWS S3\ndatasets/{user_id}/dataset.csv"]
+        S3["🪣 AWS S3\ndatasets/ · chats/"]
         AGENTCORE_MEM["🧠 AgentCore\nMemory Service"]
         AGENTCORE_CODE["💻 AgentCore\nCode Interpreter Sandbox"]
     end
@@ -119,13 +123,11 @@ flowchart TB
     %% Deterministic path
     DETERM -->|"all 6 steps"| PANDAS_OPS
     DETERM -->|"save results"| MEM_TOOLS
-    DETERM -->|"preprocess"| PREPROC
 
     %% Smart path
     SMART -->|"decide steps"| BEDROCK
     SMART -.->|"selective steps"| PANDAS_OPS
     SMART -->|"save results"| MEM_TOOLS
-    SMART -->|"preprocess"| PREPROC
 
     %% Fact checker
     FACT -->|"fetch analysis"| MEM_TOOLS
@@ -134,10 +136,12 @@ flowchart TB
 
     %% Tools to AWS
     CSV_TOOLS -->|"put/get/head"| S3
+    CHAT_STORE -->|"put/get/list/delete"| S3
     MEM_TOOLS -->|"create_event · retrieve"| AGENTCORE_MEM
     PREPROC -->|"execute python"| CODE_INTERP
     CODE_INTERP -->|"spawn sandbox"| AGENTCORE_CODE
     HANDLER -->|"upload CSV"| CSV_TOOLS
+    APP -->|"save/load chat"| CHAT_STORE
 
     %% Styles
     class APP frontend
@@ -145,7 +149,7 @@ flowchart TB
     class TUTOR,FACT agent
     class DETERM determin
     class SMART smart
-    class CSV_TOOLS,MEM_TOOLS,CODE_INTERP,PREPROC tool
+    class CSV_TOOLS,CHAT_STORE,MEM_TOOLS,CODE_INTERP,PREPROC tool
     class P1,P2,P3,P4,P5,P6 pandas
     class BEDROCK,S3,AGENTCORE_MEM,AGENTCORE_CODE aws
 ```
@@ -156,11 +160,17 @@ flowchart TB
 
 ### CSV Upload & Analysis
 1. Student uploads CSV via Streamlit
-2. Handler uploads file to S3
-3. Tutor Agent triggers Data Analyst
-4. Data Analyst runs profiling and preprocessing via Code Interpreter sandbox
+2. Handler uploads file to S3 (`datasets/{user_id}/dataset.csv`)
+3. Tutor Agent triggers Data Analyst (deterministic path by default)
+4. Data Analyst runs all 6 Pandas steps locally: profile, remove duplicates, clean missing, detect outliers, compute correlations, suggest normalization
 5. Analysis summary is saved to AgentCore Memory
-6. Tutor generates a Socratic opening question
+6. Tutor generates a Socratic opening question (does **not** share raw results)
+
+### Smart Analysis (Alternative Path)
+1. Tutor triggers `run_smart_analysis()` for targeted analysis
+2. A dedicated Strands Agent (Claude Sonnet 4.6) examines the dataset profile
+3. The LLM selectively calls only the relevant Pandas steps (e.g., skips correlations if only 1 numeric column)
+4. Results are saved to AgentCore Memory
 
 ### Fact Checking
 1. Student makes a claim (e.g. *"The average age is 35"*)
@@ -171,27 +181,38 @@ flowchart TB
 
 ### Returning User Session Restore
 1. Student logs in without uploading a new CSV
-2. Tutor checks S3 for an existing dataset
-3. Tutor retrieves previous analysis from AgentCore Memory
+2. Tutor checks S3 for an existing dataset via `has_dataset()`
+3. Tutor retrieves previous analysis from AgentCore Memory via `recall_dataset()`
 4. Dialogue resumes from where it left off
+
+### Chat History Persistence
+1. Each conversation is auto-saved to S3 at `chats/{username}/{chat_id}.json`
+2. Students can load or delete past chats from the sidebar
 
 ---
 
 ## 📁 Project Structure
 
 ```
-├── app.py                  # Streamlit frontend
-├── handler.py              # Runtime routing layer
+strandsagent/
+├── app.py                          # Streamlit frontend
+├── requirements.txt                # Python dependencies
+├── .env.example                    # Environment variable template
+├── runtime/
+│   ├── __init__.py
+│   └── handler.py                  # Runtime routing layer
 ├── agents/
-│   ├── tutor.py            # Tutor Agent (orchestrator)
-│   ├── data_analyst.py     # Data Analyst Agent
-│   └── fact_checker.py     # Fact Checker Agent
-├── tools/
-│   ├── csv_tools.py        # S3 CSV operations
-│   ├── memory_tools.py     # AgentCore Memory operations
-│   ├── code_interpreter.py # AgentCore Code Interpreter
-│   └── preprocessing_tools.py  # 8 data processing tools
-└── README.md
+│   ├── __init__.py
+│   ├── tutor_agent.py              # Tutor Agent (orchestrator)
+│   ├── data_analyst_agent.py       # Data Analyst (deterministic + smart paths)
+│   └── fact_checker_agent.py       # Fact Checker Agent
+└── tools/
+    ├── __init__.py
+    ├── csv_tools.py                # S3 CSV operations
+    ├── chat_storage.py             # S3 chat history persistence
+    ├── memory_tools.py             # AgentCore Memory operations
+    ├── code_interpreter.py         # AgentCore Code Interpreter
+    └── preprocessing_tools.py      # 8 data processing tools
 ```
 
 ---
@@ -211,31 +232,33 @@ flowchart TB
 
 ### 1. Clone the repository
 ```bash
-git clone https://github.com/your-org/strands-agent.git
-cd strands-agent
+git clone https://github.com/supakitboon/Multi-Agent.git
+cd Multi-Agent
 ```
 
 ### 2. Install dependencies
 ```bash
-pip install -r requirements.txt
+pip install -r strandsagent/requirements.txt
 ```
 
 ### 3. Configure environment variables
 ```bash
-cp .env.example .env
+cp strandsagent/.env.example strandsagent/.env
 ```
 
-Edit `.env` with your AWS credentials and config:
+Edit `strandsagent/.env` with your AWS credentials and config:
 ```env
-AWS_REGION=us-east-1
+AWS_REGION=us-east-2
 AWS_ACCESS_KEY_ID=your_access_key
 AWS_SECRET_ACCESS_KEY=your_secret_key
+AWS_SESSION_TOKEN=your_session_token
 S3_BUCKET_NAME=your_bucket_name
-AGENTCORE_MEMORY_NAMESPACE=your_namespace
+AGENTCORE_MEMORY_ID=your_memory_id
 ```
 
 ### 4. Run the app
 ```bash
+cd strandsagent
 streamlit run app.py
 ```
 
@@ -243,7 +266,6 @@ streamlit run app.py
 
 ## 🔐 Security Notes
 
-- Each user's data is isolated in S3 under `datasets/{user_id}/` and in AgentCore Memory under their own namespace
-- CSV files are capped at **10MB**
+- Each user's data is isolated in S3 under `datasets/{user_id}/` and `chats/{username}/`, and in AgentCore Memory under their own namespace
+- CSV files are capped at **10 MB**
 - Code execution runs in an **isolated AgentCore sandbox** — no access to the host environment
-
