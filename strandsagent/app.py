@@ -28,6 +28,9 @@ if "logged_in" not in st.session_state:
         # track whether the user has already been informed about a
         # previously-uploaded dataset during this browser session
         "dataset_notified": False,
+        "plan_notified": False,
+        # ── Agent mode ──
+        "agent_mode": "tutor",  # "tutor" or "planner"
         # ── Chat history ──
         "current_chat_id": None,
         "chat_created_at": None,
@@ -45,6 +48,7 @@ def process_interaction(user_input: str = "", csv_content: str = "", display_tex
         "username": st.session_state.username,
         "inputText": user_input,
         "messages": st.session_state.agent_messages,
+        "agentType": st.session_state.agent_mode,
     }
     if csv_content:
         event["csvContent"] = csv_content
@@ -124,6 +128,7 @@ def _start_new_chat():
     ss.chat_display = []
     ss.last_uploaded = None
     ss.dataset_notified = False
+    ss.plan_notified = False
     ss.chat_list_loaded = False
 
 
@@ -204,48 +209,70 @@ else:
                         st.error(f"Failed to delete chat: {e}")
 
     # ── Main Area ──
-    col1, col2 = st.columns([5, 1])
+    col1, col2, col3 = st.columns([4, 2, 1])
     with col1:
-        st.title("📊 Data Analysis Tutor")
+        agent_labels = {"tutor": "Data Analysis Tutor", "planner": "Project Planner"}
+        agent_icon = {"tutor": "📊", "planner": "📋"}
+        mode = st.session_state.agent_mode
+        st.title(f"{agent_icon[mode]} {agent_labels[mode]}")
         st.caption(f"Logged in as **{st.session_state.username}**")
     with col2:
+        new_mode = st.selectbox(
+            "Agent",
+            options=["tutor", "planner"],
+            format_func=lambda x: {"tutor": "📊 Tutor", "planner": "📋 Planner"}[x],
+            index=["tutor", "planner"].index(st.session_state.agent_mode),
+            key="agent_selector",
+        )
+        if new_mode != st.session_state.agent_mode:
+            _auto_save()
+            st.session_state.agent_mode = new_mode
+            _start_new_chat()
+            st.rerun()
+    with col3:
         if st.button("Logout"):
             _auto_save()
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
 
-    # File Uploader - Logic improved to prevent "Tool Sticking"
-    # Let the user know if we already have a stored dataset for them.
-    if st.session_state.logged_in and dataset_exists(st.session_state.username):
-        st.info("✅ You already have a dataset stored — no need to upload again unless you want to replace it.")
-    uploaded = st.file_uploader("Upload a CSV dataset", type=["csv"])
-    
-    # if the page has just loaded/refreshed and we already have a dataset
-    # for this user, proactively tell the agent so it can remind the student
-    # (only do this once per session).  We don't send any CSV content here –
-    # the handler will detect the stored dataset and the agent will reply.
-    if (not st.session_state.dataset_notified
-            and st.session_state.logged_in
-            and dataset_exists(st.session_state.username)):
-        st.session_state.dataset_notified = True
-        with st.spinner("Checking stored dataset…"):
-            process_interaction(user_input="", display_text="")
+    # File Uploader - only shown for tutor mode
+    if st.session_state.agent_mode == "tutor":
+        # Let the user know if we already have a stored dataset for them.
+        if st.session_state.logged_in and dataset_exists(st.session_state.username):
+            st.info("✅ You already have a dataset stored — no need to upload again unless you want to replace it.")
+        uploaded = st.file_uploader("Upload a CSV dataset", type=["csv"])
 
-    if uploaded is not None:
-        # Check if this is a NEW file upload
-        if uploaded.name != st.session_state.get("last_uploaded"):
-            # Update state immediately to prevent double-processing
-            st.session_state.last_uploaded = uploaded.name
-            csv_text = uploaded.getvalue().decode("utf-8")
-            
-            with st.spinner("Analyzing dataset..."):
-                process_interaction(
-                    user_input="I just uploaded my dataset.",
-                    csv_content=csv_text,
-                    display_text=f"📁 Uploaded **{uploaded.name}**"
-                )
-            # No manual st.rerun() here - let the natural flow update the chat below
+        # if the page has just loaded/refreshed and we already have a dataset
+        # for this user, proactively tell the agent so it can remind the student
+        # (only do this once per session).
+        if (not st.session_state.dataset_notified
+                and st.session_state.logged_in
+                and dataset_exists(st.session_state.username)):
+            st.session_state.dataset_notified = True
+            with st.spinner("Checking stored dataset…"):
+                process_interaction(user_input="", display_text="")
+
+        if uploaded is not None:
+            # Check if this is a NEW file upload
+            if uploaded.name != st.session_state.get("last_uploaded"):
+                st.session_state.last_uploaded = uploaded.name
+                csv_text = uploaded.getvalue().decode("utf-8")
+
+                with st.spinner("Analyzing dataset..."):
+                    process_interaction(
+                        user_input="I just uploaded my dataset.",
+                        csv_content=csv_text,
+                        display_text=f"📁 Uploaded **{uploaded.name}**"
+                    )
+    elif st.session_state.agent_mode == "planner":
+        st.info("📋 Tell me about your data analysis project and I'll help you create a plan and learning path!")
+        # On first load in planner mode, trigger the handler so the agent can
+        # detect and recall a previously saved plan (mirrors dataset_notified).
+        if not st.session_state.plan_notified and st.session_state.logged_in:
+            st.session_state.plan_notified = True
+            with st.spinner("Checking for saved plan..."):
+                process_interaction(user_input="", display_text="")
 
     st.divider()
 
@@ -346,7 +373,12 @@ else:
             st.markdown(msg["content"])
 
     # Chat Input
-    if prompt := st.chat_input("Ask about your data..."):
+    chat_placeholder = (
+        "Tell me about your project..."
+        if st.session_state.agent_mode == "planner"
+        else "Ask about your data..."
+    )
+    if prompt := st.chat_input(chat_placeholder):
         with st.spinner("Thinking..."):
             process_interaction(user_input=prompt, display_text=prompt)
         st.rerun()

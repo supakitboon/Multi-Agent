@@ -63,6 +63,50 @@ def _get_analysis(username: str) -> str:
     return text if text else json.dumps(content)
 
 
+def _save_plan(username: str, plan: str) -> str:
+    """Plain helper: persist a project plan to AgentCore Memory."""
+    _get_client().create_event(
+        memoryId=MEMORY_ID,
+        actorId=username,
+        sessionId=f"{username}-plan",
+        eventTimestamp=datetime.now(timezone.utc),
+        payload=[
+            {
+                "conversational": {
+                    "content": {"text": plan},
+                    "role": "TOOL",
+                }
+            }
+        ],
+        metadata={
+            "type": {"stringValue": "project_plan"},
+            "userId": {"stringValue": username},
+        },
+    )
+    return "Plan saved successfully."
+
+
+def _get_plan(username: str) -> str:
+    """Plain helper: retrieve most recent project plan."""
+    response = _get_client().retrieve_memory_records(
+        memoryId=MEMORY_ID,
+        namespace=username,
+        searchCriteria={
+            "searchQuery": f"project plan for {username}",
+        },
+    )
+    records = response.get("memoryRecords", [])
+    if not records:
+        return ""
+
+    latest = records[0]
+    content = latest.get("content", {})
+    if isinstance(content, str):
+        return content
+    text = content.get("text", "")
+    return text if text else json.dumps(content)
+
+
 @tool
 def save_analysis(username: str, summary: dict) -> str:
     """Persist a dataset analysis summary to AgentCore Memory keyed by username.

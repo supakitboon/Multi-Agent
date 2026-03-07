@@ -43,7 +43,9 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from agents.tutor_agent import create_tutor
+from agents.planner_agent import create_planner
 from tools.csv_tools import dataset_exists, _upload_csv
+from tools.memory_tools import _get_plan
 
 # NOTE: we used to pre-warm the CodeInterpreter sandbox at import time
 # to shave a few seconds off of the first analysis.  That meant the
@@ -217,12 +219,48 @@ def handler(event: dict, context: object = None) -> dict:
         username = _extract_username(event)
         message = event.get("inputText", "").strip()
         prior_messages = event.get("messages", [])
+        agent_type = event.get("agentType", "tutor")
 
         # Extract & validate CSV from any supported upload format
         try:
             csv_content = _extract_csv_content(event)
         except ValueError as ve:
             return _error(400, str(ve))
+
+        # Route to the appropriate agent
+        if agent_type == "planner":
+            agent = create_planner(username, prior_messages=prior_messages)
+
+            # If the student is starting fresh (no prior messages) and has a
+            # saved plan, tell the agent so it can offer to continue.
+            if not prior_messages:
+                existing_plan = ""
+                try:
+                    existing_plan = _get_plan(username)
+                except Exception:
+                    pass
+                if existing_plan:
+                    safe_message = message or "Hello"
+                    full_prompt = (
+                        "[SYSTEM: This student has a previously saved project plan. "
+                        "Call recall_plan to retrieve it, then summarize what you "
+                        "remember and ask if they want to continue with that plan "
+                        "or start a new one.]\n\n"
+                        f"Student says: {safe_message}"
+                    )
+                else:
+                    full_prompt = message or "Hello, I need help planning my data analysis project."
+            else:
+                full_prompt = message or "Hello, I need help planning my data analysis project."
+
+            response = agent(full_prompt)
+            return {
+                "statusCode": 200,
+                "body": json.dumps({
+                    "response": str(response),
+                    "messages": list(agent.messages),
+                }),
+            }
 
         tutor = create_tutor(username, prior_messages=prior_messages)
 
