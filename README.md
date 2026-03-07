@@ -104,7 +104,7 @@ Open the provided local URL in your browser to access the application.
 
 ```mermaid
 flowchart TB
-    classDef frontend fill:#4A90D9,stroke:#2C5F8A,color:#fff,rx:8
+    classDef frontend fill:#4A90D9,stroke:#2C5F8A,color:#fff,rx:8,font-size:20px
     classDef runtime fill:#7B68EE,stroke:#4B3DB5,color:#fff
     classDef agent fill:#E8A838,stroke:#B87D1A,color:#fff
     classDef determin fill:#27AE60,stroke:#1A7A42,color:#fff
@@ -112,53 +112,43 @@ flowchart TB
     classDef tool fill:#5DADE2,stroke:#2E86C1,color:#fff
     classDef pandas fill:#A569BD,stroke:#7D3C98,color:#fff
     classDef aws fill:#FF9900,stroke:#CC7A00,color:#fff
-
     subgraph UI["🖥️  Frontend — Streamlit"]
-        APP["app.py\nLogin · Session · CSV Upload · Chat"]
+        APP["app.py<br/>Login · Session<br/>CSV Upload · Chat"]
     end
-
     subgraph RUNTIME["⚙️  Runtime Layer"]
-        HANDLER["handler.py\nParse CSV · Restore History · Route"]
+        HANDLER["handler.py<br/>Parse CSV · Restore History · Route"]
     end
-
     subgraph AGENTS["🤖  Agent Layer — Strands Framework"]
-        TUTOR["🎓 Tutor Agent\nOrchestrator · Claude Sonnet 4.6"]
-
+        TUTOR["🎓 Tutor Agent<br/>Orchestrator · Claude Sonnet 4.6"]
         subgraph DATA_ANALYST["📊  Data Analyst"]
-            DETERM["🔵 Deterministic Path\nPure Pandas · No LLM\nRuns ALL 6 steps"]
-            SMART["🔴 Smart Path\nClaude Sonnet 4.6\nLLM picks steps"]
+            DETERM["🔵 Deterministic Path<br/>Pure Pandas · No LLM<br/>Runs ALL 6 steps"]
+            SMART["🔴 Smart Path<br/>Claude Sonnet 4.6<br/>LLM picks steps"]
         end
-
-        FACT["🔍 Fact Checker Agent\nClaude Sonnet 4.6"]
-        PLANNER["📋 Planner Agent\nProject Plan · Learning Path\nClaude Sonnet 4.6"]
+        FACT["🔍 Fact Checker Agent<br/>Claude Sonnet 4.6"]
+        PLANNER["📋 Planner Agent<br/>Project Plan · Learning Path<br/>Claude Sonnet 4.6"]
     end
-
     subgraph PANDAS_OPS["🐼  Pandas Analysis Steps"]
         direction LR
         P1["profile()"] --> P2["remove_duplicates()"] --> P3["clean_missing()"]
         P4["detect_outliers()"] --> P5["compute_correlations()"] --> P6["normalize()"]
     end
-
     subgraph TOOLS["🛠️  Tool Layer"]
-        CSV_TOOLS["csv_tools.py\nupload · download · exists"]
-        CHAT_STORE["chat_storage.py\nsave · load · list · delete"]
-        MEM_TOOLS["memory_tools.py\nsave · get analysis"]
-        CODE_INTERP["code_interpreter.py\nCodeInterpreterSession"]
-        PREPROC["preprocessing_tools.py\n8 processing tools"]
+        CSV_TOOLS["csv_tools.py<br/>upload · download · exists"]
+        CHAT_STORE["chat_storage.py<br/>save · load · list · delete"]
+        MEM_TOOLS["memory_tools.py<br/>save · get analysis"]
+        CODE_INTERP["code_interpreter.py<br/>CodeInterpreterSession"]
+        PREPROC["preprocessing_tools.py<br/>8 processing tools"]
     end
-
     subgraph AWS["☁️  AWS Cloud Services"]
-        BEDROCK["⚡ AWS Bedrock\nClaude Sonnet 4.6"]
-        S3["🪣 AWS S3\ndatasets/ · chats/"]
-        AGENTCORE_MEM["🧠 AgentCore\nMemory Service"]
-        AGENTCORE_CODE["💻 AgentCore\nCode Interpreter Sandbox"]
+        BEDROCK["⚡ AWS Bedrock<br/>Claude Sonnet 4.6"]
+        S3["🪣 AWS S3<br/>datasets/ · chats/"]
+        AGENTCORE_MEM["🧠 AgentCore<br/>Memory Service"]
+        AGENTCORE_CODE["💻 AgentCore<br/>Code Interpreter Sandbox"]
     end
-
     %% Main flow
     APP -->|"process_interaction()"| HANDLER
     HANDLER -->|"agentType=tutor"| TUTOR
     HANDLER -->|"agentType=planner"| PLANNER
-
     %% Tutor delegates
     TUTOR -->|"run_analysis()"| DETERM
     TUTOR -->|"run_smart_analysis()"| SMART
@@ -166,25 +156,20 @@ flowchart TB
     TUTOR -->|"recall_dataset()"| MEM_TOOLS
     TUTOR -->|"has_dataset()"| CSV_TOOLS
     TUTOR -->|"LLM calls"| BEDROCK
-
     %% Deterministic path
     DETERM -->|"all 6 steps"| PANDAS_OPS
     DETERM -->|"save results"| MEM_TOOLS
-
     %% Smart path
     SMART -->|"decide steps"| BEDROCK
     SMART -.->|"selective steps"| PANDAS_OPS
     SMART -->|"save results"| MEM_TOOLS
-
     %% Fact checker
     FACT -->|"fetch analysis"| MEM_TOOLS
     FACT -->|"fetch CSV"| CSV_TOOLS
     FACT -->|"verify claim"| BEDROCK
-
     %% Planner agent
     PLANNER -->|"save_plan · recall_plan"| MEM_TOOLS
     PLANNER -->|"LLM calls"| BEDROCK
-
     %% Tools to AWS
     CSV_TOOLS -->|"put/get/head"| S3
     CHAT_STORE -->|"put/get/list/delete"| S3
@@ -193,7 +178,6 @@ flowchart TB
     CODE_INTERP -->|"spawn sandbox"| AGENTCORE_CODE
     HANDLER -->|"upload CSV"| CSV_TOOLS
     APP -->|"save/load chat"| CHAT_STORE
-
     %% Styles
     class APP frontend
     class HANDLER runtime
