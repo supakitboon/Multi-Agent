@@ -56,46 +56,98 @@ The system is composed of four layers:
 
 ```mermaid
 flowchart TB
-    subgraph UI["Frontend (Streamlit)"]
-        APP["app.py<br/>- Login / Session Mgmt<br/>- CSV Upload<br/>- Chat Interface"]
+    classDef frontend fill:#4A90D9,stroke:#2C5F8A,color:#fff,rx:8
+    classDef runtime fill:#7B68EE,stroke:#4B3DB5,color:#fff
+    classDef agent fill:#E8A838,stroke:#B87D1A,color:#fff
+    classDef determin fill:#27AE60,stroke:#1A7A42,color:#fff
+    classDef smart fill:#E74C3C,stroke:#A93226,color:#fff
+    classDef tool fill:#5DADE2,stroke:#2E86C1,color:#fff
+    classDef pandas fill:#A569BD,stroke:#7D3C98,color:#fff
+    classDef aws fill:#FF9900,stroke:#CC7A00,color:#fff
+
+    subgraph UI["🖥️  Frontend — Streamlit"]
+        APP["app.py\nLogin · Session · CSV Upload · Chat"]
     end
-    subgraph RUNTIME["Runtime Layer"]
-        HANDLER["handler.py<br/>- Parse CSV (raw/base64/multipart)<br/>- Restore conversation history<br/>- Route to Tutor Agent"]
+
+    subgraph RUNTIME["⚙️  Runtime Layer"]
+        HANDLER["handler.py\nParse CSV · Restore History · Route"]
     end
-    subgraph AGENTS["Agent Layer (Strands Framework)"]
-        TUTOR["Tutor Agent<br/>(Orchestrator)<br/>Claude Sonnet 4.6"]
-        DATA["Data Analyst Agent<br/>(Local Pandas processing)"]
-        FACT["Fact Checker Agent<br/>Claude Sonnet 4.6"]
+
+    subgraph AGENTS["🤖  Agent Layer — Strands Framework"]
+        TUTOR["🎓 Tutor Agent\nOrchestrator · Claude Sonnet 4.6"]
+
+        subgraph DATA_ANALYST["📊  Data Analyst"]
+            DETERM["🔵 Deterministic Path\nPure Pandas · No LLM\nRuns ALL 6 steps"]
+            SMART["🔴 Smart Path\nClaude Sonnet 4.6\nLLM picks steps"]
+        end
+
+        FACT["🔍 Fact Checker Agent\nClaude Sonnet 4.6"]
     end
-    subgraph TOOLS["Tool Layer"]
-        CSV_TOOLS["csv_tools.py<br/>upload / download / exists"]
-        MEM_TOOLS["memory_tools.py<br/>save / get analysis"]
-        CODE_INTERP["code_interpreter.py<br/>CodeInterpreterSession"]
-        PREPROC["preprocessing_tools.py<br/>8 data processing tools"]
+
+    subgraph PANDAS_OPS["🐼  Pandas Analysis Steps"]
+        direction LR
+        P1["profile()"] --> P2["remove_duplicates()"] --> P3["clean_missing()"]
+        P4["detect_outliers()"] --> P5["compute_correlations()"] --> P6["normalize()"]
     end
-    subgraph AWS["AWS Cloud Services"]
-        BEDROCK["AWS Bedrock<br/>Claude Sonnet 4.6 LLM"]
-        S3["AWS S3<br/>datasets/{user_id}/dataset.csv"]
-        AGENTCORE_MEM["AWS AgentCore<br/>Memory Service"]
-        AGENTCORE_CODE["AWS AgentCore<br/>Code Interpreter Sandbox"]
+
+    subgraph TOOLS["🛠️  Tool Layer"]
+        CSV_TOOLS["csv_tools.py\nupload · download · exists"]
+        MEM_TOOLS["memory_tools.py\nsave · get analysis"]
+        CODE_INTERP["code_interpreter.py\nCodeInterpreterSession"]
+        PREPROC["preprocessing_tools.py\n8 processing tools"]
     end
+
+    subgraph AWS["☁️  AWS Cloud Services"]
+        BEDROCK["⚡ AWS Bedrock\nClaude Sonnet 4.6"]
+        S3["🪣 AWS S3\ndatasets/{user_id}/dataset.csv"]
+        AGENTCORE_MEM["🧠 AgentCore\nMemory Service"]
+        AGENTCORE_CODE["💻 AgentCore\nCode Interpreter Sandbox"]
+    end
+
+    %% Main flow
     APP -->|"process_interaction()"| HANDLER
-    HANDLER -->|"create_tutor(username, messages)"| TUTOR
-    TUTOR -->|"run_analysis()"| DATA
+    HANDLER -->|"create_tutor()"| TUTOR
+
+    %% Tutor delegates
+    TUTOR -->|"run_analysis()"| DETERM
+    TUTOR -->|"run_smart_analysis()"| SMART
     TUTOR -->|"check_claim()"| FACT
     TUTOR -->|"recall_dataset()"| MEM_TOOLS
     TUTOR -->|"has_dataset()"| CSV_TOOLS
-    DATA -->|"profile & preprocess"| PREPROC
-    DATA -->|"save results"| MEM_TOOLS
-    FACT -->|"fetch stored analysis"| MEM_TOOLS
-    FACT -->|"fetch raw CSV"| CSV_TOOLS
-    FACT -->|"LLM verification call"| BEDROCK
-    CSV_TOOLS -->|"boto3 put/get/head_object"| S3
-    MEM_TOOLS -->|"create_event / retrieve"| AGENTCORE_MEM
-    CODE_INTERP -->|"spawn sandbox"| AGENTCORE_CODE
+    TUTOR -->|"LLM calls"| BEDROCK
+
+    %% Deterministic path
+    DETERM -->|"all 6 steps"| PANDAS_OPS
+    DETERM -->|"save results"| MEM_TOOLS
+    DETERM -->|"preprocess"| PREPROC
+
+    %% Smart path
+    SMART -->|"decide steps"| BEDROCK
+    SMART -.->|"selective steps"| PANDAS_OPS
+    SMART -->|"save results"| MEM_TOOLS
+    SMART -->|"preprocess"| PREPROC
+
+    %% Fact checker
+    FACT -->|"fetch analysis"| MEM_TOOLS
+    FACT -->|"fetch CSV"| CSV_TOOLS
+    FACT -->|"verify claim"| BEDROCK
+
+    %% Tools to AWS
+    CSV_TOOLS -->|"put/get/head"| S3
+    MEM_TOOLS -->|"create_event · retrieve"| AGENTCORE_MEM
     PREPROC -->|"execute python"| CODE_INTERP
-    TUTOR -->|"Strands Agent LLM calls"| BEDROCK
-    HANDLER -->|"upload CSV on receive"| CSV_TOOLS
+    CODE_INTERP -->|"spawn sandbox"| AGENTCORE_CODE
+    HANDLER -->|"upload CSV"| CSV_TOOLS
+
+    %% Styles
+    class APP frontend
+    class HANDLER runtime
+    class TUTOR,FACT agent
+    class DETERM determin
+    class SMART smart
+    class CSV_TOOLS,MEM_TOOLS,CODE_INTERP,PREPROC tool
+    class P1,P2,P3,P4,P5,P6 pandas
+    class BEDROCK,S3,AGENTCORE_MEM,AGENTCORE_CODE aws
 ```
 
 ---
