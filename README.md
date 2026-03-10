@@ -6,20 +6,32 @@ An intelligent tutoring system that teaches students data analysis through Socra
 
 ## 🧠 How It Works
 
-Students can switch between two agents via a dropdown in the UI:
+The system automatically routes messages to the right agent based on context:
 
-**📊 Tutor Agent** — Upload a CSV file and chat with an AI tutor that:
+**📊 Tutor Agent** (default) — Upload a CSV file and chat with an AI tutor that:
 - Analyzes their dataset automatically (deterministic or LLM-powered)
 - Asks Socratic questions to guide their thinking
 - Fact-checks claims students make about their data
 - Remembers previous sessions so learning can continue across logins
 - Persists chat history so students can revisit past conversations
+- Automatically routes to the Planner Agent when students ask about planning
 
-**📋 Planner Agent** — Get help planning a data analysis project:
+**📈 Data Analyst Agent** (called internally by the Tutor) — Analyzes the student's dataset:
+- **Deterministic path** (default): Runs all 6 Pandas analysis steps locally — no LLM needed (profile, remove duplicates, clean missing, detect outliers, compute correlations, suggest normalization)
+- **Smart path** (on-demand): An LLM examines the dataset and selectively runs only the relevant analysis steps
+- Results are saved to AgentCore Memory for private tutor use — never shared directly with students
+
+**🔍 Fact Checker Agent** (called internally by the Tutor) — Verifies student claims against actual data:
+- Retrieves stored analysis from AgentCore Memory + raw CSV from S3 (runs smart analysis on demand if none exists)
+- Uses Claude Sonnet 4.6 to evaluate the claim as `CORRECT` / `WRONG` / `AMBIGUOUS` with reasoning and pandas code
+- Single-shot LLM call with no tools — all context is pre-fetched into the prompt
+
+**📋 Planner Agent** (auto-activated when planning is requested) — Get help planning a data analysis project:
 - Interviews the student about their project, skills, timeline, and goals
 - Creates a week-by-week project plan with milestones
 - Generates a personalized learning path for missing skills
 - Saves and recalls plans across sessions via AgentCore Memory
+- Automatically routes back to the Tutor Agent for data analysis questions
 
 ---
 
@@ -31,16 +43,16 @@ The system is composed of four layers:
 - `app.py` — handles login/session management, CSV upload, chat interface, and chat history sidebar (load/delete past conversations)
 
 ### 2. Runtime Layer
-- `runtime/handler.py` — parses incoming CSV (raw, base64, or multipart), restores conversation history, and routes requests to the appropriate agent (Tutor or Planner) based on the `agentType` field
+- `runtime/handler.py` — parses incoming CSV (raw, base64, or multipart), restores conversation history, and routes requests to the appropriate agent (Tutor or Planner) based on the `activeAgent` field
 
 ### 3. Agent Layer (Strands Framework)
 | Agent | Role | Model |
 |---|---|---|
-| **Tutor Agent** | Orchestrator — drives Socratic dialogue | Claude Sonnet 4.6 |
+| **Tutor Agent** | Orchestrator — drives Socratic dialogue, routes to Planner when needed | Claude Sonnet 4.6 |
 | **Data Analyst** (Deterministic path) | Runs ALL 6 Pandas analysis steps — no LLM | — |
 | **Data Analyst** (Smart path) | LLM decides which analysis steps are relevant | Claude Sonnet 4.6 |
-| **Fact Checker Agent** | Verifies student claims against actual data | Claude Sonnet 4.6 |
-| **Planner Agent** | Interviews student & creates project plan + learning path | Claude Sonnet 4.6 |
+| **Fact Checker Agent** | Verifies student claims against actual data (runs smart analysis on demand if needed) | Claude Sonnet 4.6 |
+| **Planner Agent** | Interviews student & creates project plan + learning path, routes back to Tutor for data questions | Claude Sonnet 4.6 |
 
 ### 4. Tool Layer
 | Tool | Responsibility |
@@ -64,43 +76,7 @@ The system is composed of four layers:
 
 ---
 
-## � Installation
-
-1. Clone the repository:
-   ```bash
-   git clone <repository-url>
-   cd Multi-Agent
-   ```
-
-2. Navigate to the project directory and install dependencies:
-   ```bash
-   cd strandsagent
-   pip install -r requirements.txt
-   ```
-
-## ⚙️ Setup
-
-1. Create a `.env` file in the `strandsagent/` directory with your AWS credentials and configuration:
-   ```
-   AWS_ACCESS_KEY_ID=your_access_key_id
-   AWS_SECRET_ACCESS_KEY=your_secret_access_key
-   AWS_DEFAULT_REGION=us-east-1
-   ```
-
-2. Ensure you have access to AWS Bedrock with the `us.anthropic.claude-sonnet-4-6` model, and the necessary permissions for S3 and AgentCore services.
-
-## ▶️ Running the Application
-
-From the `strandsagent/` directory, run:
-```bash
-streamlit run app.py
-```
-
-Open the provided local URL in your browser to access the application.
-
----
-
-## �🗺️ System Architecture Diagram
+## 🗺️ System Architecture Diagram
 
 ```mermaid
 flowchart TB
@@ -155,6 +131,7 @@ flowchart TB
     TUTOR -->|"check_claim()"| FACT
     TUTOR -->|"recall_dataset()"| MEM_TOOLS
     TUTOR -->|"has_dataset()"| CSV_TOOLS
+    TUTOR -->|"start_planning()"| PLANNER
     TUTOR -->|"LLM calls"| BEDROCK
     %% Deterministic path
     DETERM -->|"all 6 steps"| PANDAS_OPS
@@ -166,9 +143,12 @@ flowchart TB
     %% Fact checker
     FACT -->|"fetch analysis"| MEM_TOOLS
     FACT -->|"fetch CSV"| CSV_TOOLS
+    FACT -.->|"smart analysis (if needed)"| SMART
     FACT -->|"verify claim"| BEDROCK
     %% Planner agent
-    PLANNER -->|"save_plan · recall_plan"| MEM_TOOLS
+    PLANNER -->|"save_plan · recall_plan · delete_plan"| MEM_TOOLS
+    PLANNER -->|"view_dataset()"| CSV_TOOLS
+    PLANNER -->|"return_to_tutor()"| TUTOR
     PLANNER -->|"LLM calls"| BEDROCK
     %% Tools to AWS
     CSV_TOOLS -->|"put/get/head"| S3
@@ -210,8 +190,8 @@ flowchart TB
 ### Fact Checking
 1. Student makes a claim (e.g. *"The average age is 35"*)
 2. Tutor delegates to Fact Checker Agent
-3. Fact Checker retrieves stored analysis from AgentCore Memory + raw CSV from S3
-4. Claude verifies the claim and returns `CORRECT` / `WRONG` / `AMBIGUOUS` with reasoning
+3. Fact Checker retrieves stored analysis from AgentCore Memory + raw CSV from S3 (if no analysis exists, it runs a smart analysis on demand)
+4. Claude verifies the claim using the analysis summary and a data preview (first 20 rows + descriptive stats), returns `CORRECT` / `WRONG` / `AMBIGUOUS` with reasoning and pandas code
 5. Tutor wraps the verdict in a Socratic follow-up response
 
 ### Returning User Session Restore
@@ -221,11 +201,12 @@ flowchart TB
 4. Dialogue resumes from where it left off
 
 ### Project Planning & Learning Path
-1. Student switches to the Planner Agent via the dropdown
+1. Student asks about planning, timelines, or learning paths — the Tutor automatically routes to the Planner Agent via `start_planning()`
 2. Planner interviews the student about their project topic, experience level, timeline, and goals
 3. Planner creates a week-by-week project plan with milestones and a personalized learning path for missing skills
 4. Plan is saved to AgentCore Memory via `save_plan()`
-5. When the student returns, the handler detects the existing plan and the agent offers to continue or start fresh
+5. Subsequent messages go directly to the Planner; if the student asks a data question, the Planner routes back to the Tutor via `return_to_tutor()`
+6. When the student returns, the handler detects the existing plan and the agent offers to continue or start fresh
 
 ### Chat History Persistence
 1. Each conversation is auto-saved to S3 at `chats/{username}/{chat_id}.json`
