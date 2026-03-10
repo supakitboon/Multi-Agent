@@ -45,7 +45,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from agents.tutor_agent import create_tutor
 from agents.planner_agent import create_planner
 from tools.csv_tools import dataset_exists, _upload_csv
-from tools.memory_tools import _get_plan
 
 # NOTE: we used to pre-warm the CodeInterpreter sandbox at import time
 # to shave a few seconds off of the first analysis.  That meant the
@@ -219,7 +218,8 @@ def handler(event: dict, context: object = None) -> dict:
         username = _extract_username(event)
         message = event.get("inputText", "").strip()
         prior_messages = event.get("messages", [])
-        agent_type = event.get("agentType", "tutor")
+        active_agent = event.get("activeAgent", "tutor")
+        planner_messages = event.get("plannerMessages", [])
 
         # Extract & validate CSV from any supported upload format
         try:
@@ -227,87 +227,121 @@ def handler(event: dict, context: object = None) -> dict:
         except ValueError as ve:
             return _error(400, str(ve))
 
-        # Route to the appropriate agent
-        if agent_type == "planner":
-            agent = create_planner(username, prior_messages=prior_messages)
-
-            # If the student is starting fresh (no prior messages) and has a
-            # saved plan, tell the agent so it can offer to continue.
-            if not prior_messages:
-                existing_plan = ""
-                try:
-                    existing_plan = _get_plan(username)
-                except Exception:
-                    pass
-                if existing_plan:
-                    safe_message = message or "Hello"
-                    full_prompt = (
-                        "[SYSTEM: This student has a previously saved project plan. "
-                        "Call recall_plan to retrieve it, then summarize what you "
-                        "remember and ask if they want to continue with that plan "
-                        "or start a new one.]\n\n"
-                        f"Student says: {safe_message}"
-                    )
-                else:
-                    full_prompt = message or "Hello, I need help planning my data analysis project."
-            else:
-                full_prompt = message or "Hello, I need help planning my data analysis project."
-
-            response = agent(full_prompt)
-            return {
-                "statusCode": 200,
-                "body": json.dumps({
-                    "response": str(response),
-                    "messages": list(agent.messages),
-                }),
-            }
-
-        tutor = create_tutor(username, prior_messages=prior_messages)
-
-        # Trigger logic
-        if csv_content:
-            # Upload to S3 immediately — don't send CSV through the LLM
-            _upload_csv(user_id=username, csv_content=csv_content)
-            col_preview = ""
-            try:
-                header_line = csv_content.split("\n", 1)[0].strip()
-                col_preview = f" Columns: {header_line}."
-            except Exception:
-                pass
-            full_prompt = (
-                f"[SYSTEM: The student just uploaded a CSV dataset. "
-                f"It has been saved to storage.{col_preview}]\n\n"
-                f"Student says: {message}"
-            )
-        elif not prior_messages and dataset_exists(username):
-            # User is starting a new conversation but a dataset already lives
-            # in storage.  We want the agent to both *know* that fact and to
-            # proactively tell the student that their data is still available
-            # (so they don't have to upload again when the page is refreshed).
-            reminder = (
-                "This student already has a dataset stored from a previous session. "
-                "Do NOT ask them to upload again — use recall_dataset to retrieve the analysis. "
-                "Mention in your response that you still have their data and can continue."
-            )
-            safe_message = message or "Hello"
-            full_prompt = (
-                f"[SYSTEM: {reminder}]\n\n"
-                f"Student says: {safe_message}"
+        # ── Route to the currently active agent ──────────────────────────
+        if active_agent == "planner":
+            return _handle_planner(
+                username, message, prior_messages, planner_messages
             )
         else:
-            full_prompt = message
+            return _handle_tutor(
+                username, message, prior_messages, planner_messages, csv_content
+            )
+    except Exception as e:
+        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
 
-        response = tutor(full_prompt)
 
+def _build_tutor_prompt(
+    username: str, message: str, prior_messages: list, csv_content: str
+) -> str:
+    """Build the prompt sent to the tutor, injecting system context as needed."""
+    if csv_content:
+        _upload_csv(user_id=username, csv_content=csv_content)
+        col_preview = ""
+        try:
+            header_line = csv_content.split("\n", 1)[0].strip()
+            col_preview = f" Columns: {header_line}."
+        except Exception:
+            pass
+        return (
+            f"[SYSTEM: The student just uploaded a CSV dataset. "
+            f"It has been saved to storage.{col_preview}]\n\n"
+            f"Student says: {message}"
+        )
+
+    if not prior_messages and dataset_exists(username):
+        reminder = (
+            "This student already has a dataset stored from a previous session. "
+            "Do NOT ask them to upload again — use recall_dataset to retrieve the analysis. "
+            "Mention in your response that you still have their data and can continue."
+        )
+        safe_message = message or "Hello"
+        return f"[SYSTEM: {reminder}]\n\nStudent says: {safe_message}"
+
+    return message
+
+
+def _handle_tutor(
+    username: str,
+    message: str,
+    tutor_messages: list,
+    planner_messages: list,
+    csv_content: str,
+) -> dict:
+    """Run the tutor agent.  If it routes to the planner, signal the switch."""
+    routing_state = {"switch_to": None, "planner_messages": planner_messages}
+
+    tutor = create_tutor(
+        username, prior_messages=tutor_messages, routing_state=routing_state
+    )
+
+    full_prompt = _build_tutor_prompt(username, message, tutor_messages, csv_content)
+    response = tutor(full_prompt)
+
+    new_active = (
+        "planner" if routing_state["switch_to"] == "planner" else "tutor"
+    )
+    new_planner = routing_state.get("planner_messages", planner_messages)
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "response": str(response),
+            "messages": list(tutor.messages),
+            "plannerMessages": new_planner,
+            "activeAgent": new_active,
+        }),
+    }
+
+
+def _handle_planner(
+    username: str,
+    message: str,
+    tutor_messages: list,
+    planner_messages: list,
+) -> dict:
+    """Run the planner agent.  If it routes back to the tutor, re-process."""
+    routing_state = {"switch_to": None}
+
+    planner = create_planner(
+        username, prior_messages=planner_messages, routing_state=routing_state
+    )
+    response = planner(message)
+
+    if routing_state["switch_to"] == "tutor":
+        # Planner decided this isn't a planning question — re-route to tutor.
+        # We pass csv_content="" because CSV uploads always go through the
+        # tutor path (active_agent resets to "tutor" on new chat).
+        tutor = create_tutor(username, prior_messages=tutor_messages)
+        tutor_response = tutor(message)
         return {
             "statusCode": 200,
             "body": json.dumps({
-                "response": str(response),
+                "response": str(tutor_response),
                 "messages": list(tutor.messages),
+                "plannerMessages": planner_messages,  # keep prior planner state
+                "activeAgent": "tutor",
             }),
         }
-    except Exception as e:
-        return {"statusCode": 500, "body": json.dumps({"error": str(e)})}
+
+    return {
+        "statusCode": 200,
+        "body": json.dumps({
+            "response": str(response),
+            "messages": tutor_messages,  # tutor messages unchanged
+            "plannerMessages": list(planner.messages),
+            "activeAgent": "planner",
+        }),
+    }
 
 
 def _extract_username(event: dict) -> str:

@@ -86,6 +86,12 @@ def _save_plan(username: str, plan: str) -> str:
     return "Plan saved successfully."
 
 
+def _delete_plan(username: str) -> str:
+    """Plain helper: delete a student's project plan by saving an empty marker."""
+    _save_plan(username, "")
+    return "Plan deleted successfully."
+
+
 def _get_plan(username: str) -> str:
     """Plain helper: retrieve most recent project plan."""
     response = _get_client().retrieve_memory_records(

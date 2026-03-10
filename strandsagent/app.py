@@ -1,9 +1,11 @@
 import json
 import os
 import sys
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
 # Load .env from the same directory
@@ -17,20 +19,26 @@ from tools.chat_storage import save_chat, load_chat, list_chats, delete_chat  # 
 
 st.set_page_config(page_title="Data Analysis Tutor", page_icon="📊", layout="centered")
 
+@contextmanager
+def animated_spinner():
+    """Show a simple Streamlit spinner while processing."""
+    with st.spinner("Thinking..."):
+        yield
+
+
 # ── Session state defaults ────────────────────────────────────────────────────
 if "logged_in" not in st.session_state:
     st.session_state.update({
         "logged_in": False,
         "username": "",
         "agent_messages": [],
+        "planner_messages": [],
+        "active_agent": "tutor",
         "chat_display": [],
         "last_uploaded": None,
         # track whether the user has already been informed about a
         # previously-uploaded dataset during this browser session
         "dataset_notified": False,
-        "plan_notified": False,
-        # ── Agent mode ──
-        "agent_mode": "tutor",  # "tutor" or "planner"
         # ── Chat history ──
         "current_chat_id": None,
         "chat_created_at": None,
@@ -48,7 +56,8 @@ def process_interaction(user_input: str = "", csv_content: str = "", display_tex
         "username": st.session_state.username,
         "inputText": user_input,
         "messages": st.session_state.agent_messages,
-        "agentType": st.session_state.agent_mode,
+        "activeAgent": st.session_state.active_agent,
+        "plannerMessages": st.session_state.planner_messages,
     }
     if csv_content:
         event["csvContent"] = csv_content
@@ -60,14 +69,16 @@ def process_interaction(user_input: str = "", csv_content: str = "", display_tex
 
         if "error" in body:
             st.session_state.chat_display.append({
-                "role": "assistant", 
+                "role": "assistant",
                 "content": f"⚠️ {body['error']}"
             })
         else:
-            # Sync the internal agent history and the UI display
+            # Sync the internal agent history, planner history, and active agent
             st.session_state.agent_messages = body.get("messages", [])
+            st.session_state.planner_messages = body.get("plannerMessages", [])
+            st.session_state.active_agent = body.get("activeAgent", "tutor")
             st.session_state.chat_display.append({
-                "role": "assistant", 
+                "role": "assistant",
                 "content": body["response"]
             })
     except Exception as e:
@@ -113,6 +124,8 @@ def _auto_save():
             agent_messages=ss.agent_messages,
             chat_display=ss.chat_display,
             created_at=ss.chat_created_at,
+            planner_messages=ss.planner_messages,
+            active_agent=ss.active_agent,
         )
         ss.chat_list_loaded = False  # refresh sidebar on next rerun
     except Exception as e:
@@ -125,10 +138,11 @@ def _start_new_chat():
     ss.current_chat_id = _generate_chat_id()
     ss.chat_created_at = datetime.now(timezone.utc).isoformat()
     ss.agent_messages = []
+    ss.planner_messages = []
+    ss.active_agent = "tutor"
     ss.chat_display = []
     ss.last_uploaded = None
     ss.dataset_notified = False
-    ss.plan_notified = False
     ss.chat_list_loaded = False
 
 
@@ -139,6 +153,8 @@ def _load_existing_chat(chat_id):
     ss.current_chat_id = data["chat_id"]
     ss.chat_created_at = data.get("created_at")
     ss.agent_messages = data.get("agent_messages", [])
+    ss.planner_messages = data.get("planner_messages", [])
+    ss.active_agent = data.get("active_agent", "tutor")
     ss.chat_display = data.get("chat_display", [])
     ss.last_uploaded = None
     ss.dataset_notified = True  # don't re-notify about dataset
@@ -209,76 +225,53 @@ else:
                         st.error(f"Failed to delete chat: {e}")
 
     # ── Main Area ──
-    col1, col2, col3 = st.columns([4, 2, 1])
+    col1, col2 = st.columns([5, 1])
     with col1:
-        agent_labels = {"tutor": "Data Analysis Tutor", "planner": "Project Planner"}
-        agent_icon = {"tutor": "📊", "planner": "📋"}
-        mode = st.session_state.agent_mode
-        st.title(f"{agent_icon[mode]} {agent_labels[mode]}")
+        st.title("📊 Data Analysis Tutor")
         st.caption(f"Logged in as **{st.session_state.username}**")
     with col2:
-        new_mode = st.selectbox(
-            "Agent",
-            options=["tutor", "planner"],
-            format_func=lambda x: {"tutor": "📊 Tutor", "planner": "📋 Planner"}[x],
-            index=["tutor", "planner"].index(st.session_state.agent_mode),
-            key="agent_selector",
-        )
-        if new_mode != st.session_state.agent_mode:
-            _auto_save()
-            st.session_state.agent_mode = new_mode
-            _start_new_chat()
-            st.rerun()
-    with col3:
         if st.button("Logout"):
             _auto_save()
             for key in list(st.session_state.keys()):
                 del st.session_state[key]
             st.rerun()
 
-    # File Uploader - only shown for tutor mode
-    if st.session_state.agent_mode == "tutor":
-        # Let the user know if we already have a stored dataset for them.
-        if st.session_state.logged_in and dataset_exists(st.session_state.username):
-            st.info("✅ You already have a dataset stored — no need to upload again unless you want to replace it.")
-        uploaded = st.file_uploader("Upload a CSV dataset", type=["csv"])
+    # ── Active agent indicator ──
+    if st.session_state.active_agent == "planner":
+        st.info("You're currently talking to the **Project Planner**. Ask a data question to switch back to the Tutor.")
 
-        # if the page has just loaded/refreshed and we already have a dataset
-        # for this user, proactively tell the agent so it can remind the student
-        # (only do this once per session).
-        if (not st.session_state.dataset_notified
-                and st.session_state.logged_in
-                and dataset_exists(st.session_state.username)):
-            st.session_state.dataset_notified = True
-            with st.spinner("Checking stored dataset…"):
-                process_interaction(user_input="", display_text="")
+    # File Uploader
+    if st.session_state.logged_in and dataset_exists(st.session_state.username):
+        st.info("✅ You already have a dataset stored — no need to upload again unless you want to replace it.")
+    uploaded = st.file_uploader("Upload a CSV dataset", type=["csv"])
 
-        if uploaded is not None:
-            # Check if this is a NEW file upload
-            if uploaded.name != st.session_state.get("last_uploaded"):
-                st.session_state.last_uploaded = uploaded.name
-                csv_text = uploaded.getvalue().decode("utf-8")
+    # if the page has just loaded/refreshed and we already have a dataset
+    # for this user, proactively tell the agent so it can remind the student
+    # (only do this once per session).
+    if (not st.session_state.dataset_notified
+            and st.session_state.logged_in
+            and dataset_exists(st.session_state.username)):
+        st.session_state.dataset_notified = True
+        with animated_spinner():
+            process_interaction(user_input="", display_text="")
 
-                with st.spinner("Analyzing dataset..."):
-                    process_interaction(
-                        user_input="I just uploaded my dataset.",
-                        csv_content=csv_text,
-                        display_text=f"📁 Uploaded **{uploaded.name}**"
-                    )
-    elif st.session_state.agent_mode == "planner":
-        st.info("📋 Tell me about your data analysis project and I'll help you create a plan and learning path!")
-        # On first load in planner mode, trigger the handler so the agent can
-        # detect and recall a previously saved plan (mirrors dataset_notified).
-        if not st.session_state.plan_notified and st.session_state.logged_in:
-            st.session_state.plan_notified = True
-            with st.spinner("Checking for saved plan..."):
-                process_interaction(user_input="", display_text="")
+    if uploaded is not None:
+        # Check if this is a NEW file upload
+        if uploaded.name != st.session_state.get("last_uploaded"):
+            st.session_state.last_uploaded = uploaded.name
+            csv_text = uploaded.getvalue().decode("utf-8")
+
+            with animated_spinner():
+                process_interaction(
+                    user_input="I just uploaded my dataset.",
+                    csv_content=csv_text,
+                    display_text=f"📁 Uploaded **{uploaded.name}**"
+                )
 
     st.divider()
 
     # ── Pixel cat walking animation ──
     # Uses st.components.v1.html so JavaScript actually runs (st.markdown strips scripts)
-    import streamlit.components.v1 as components
     components.html("""
     <canvas id="pixelCat" width="32" height="32" style="
         position:fixed; bottom:6px; left:-64px; z-index:9999;
@@ -372,13 +365,26 @@ else:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
+    # Auto-scroll to the latest message
+    if st.session_state.chat_display:
+        components.html("""
+        <script>
+        (function() {
+            const topDoc = window.parent.document;
+            // Scroll the main Streamlit container to the bottom
+            const mainArea = topDoc.querySelector('section.main .block-container');
+            if (mainArea) {
+                mainArea.scrollTop = mainArea.scrollHeight;
+            }
+            // Also scroll the whole page
+            topDoc.documentElement.scrollTop = topDoc.documentElement.scrollHeight;
+            window.parent.scrollTo(0, topDoc.body.scrollHeight);
+        })();
+        </script>
+        """, height=0)
+
     # Chat Input
-    chat_placeholder = (
-        "Tell me about your project..."
-        if st.session_state.agent_mode == "planner"
-        else "Ask about your data..."
-    )
-    if prompt := st.chat_input(chat_placeholder):
-        with st.spinner("Thinking..."):
+    if prompt := st.chat_input("Ask about your data or plan your project..."):
+        with animated_spinner():
             process_interaction(user_input=prompt, display_text=prompt)
         st.rerun()

@@ -30,7 +30,8 @@ def _chat_key(username: str, chat_id: str) -> str:
     return f"chats/{username}/{chat_id}.json"
 
 
-def save_chat(username, chat_id, title, agent_messages, chat_display, created_at=None):
+def save_chat(username, chat_id, title, agent_messages, chat_display,
+              created_at=None, planner_messages=None, active_agent="tutor"):
     """Save (or update) a chat session to S3."""
     now = datetime.now(timezone.utc).isoformat()
     data = {
@@ -40,6 +41,8 @@ def save_chat(username, chat_id, title, agent_messages, chat_display, created_at
         "updated_at": now,
         "agent_messages": agent_messages,
         "chat_display": chat_display,
+        "planner_messages": planner_messages or [],
+        "active_agent": active_agent,
     }
     key = _chat_key(username, chat_id)
     _get_s3().put_object(

@@ -8,8 +8,9 @@ _BOTO_CONFIG = Config(read_timeout=300, connect_timeout=60)
 
 from agents.data_analyst_agent import _analyze_dataset, _smart_analyze_dataset
 from agents.fact_checker_agent import _fact_check_claim
+from agents.planner_agent import create_planner
 from tools.csv_tools import dataset_exists, _download_csv
-from tools.memory_tools import _get_analysis
+from tools.memory_tools import _get_analysis, _get_plan
 
 _SYSTEM_PROMPT = """You are a Socratic data analysis tutor. Your job is to help students
 DISCOVER insights themselves — not to hand them answers.
@@ -37,11 +38,12 @@ Do NOT call any tool yet. Ask a clarifying question and offer focused options:
 "Good question! There are several directions we could explore — which one
 interests you most?
 
-1. **Data quality** — Are there missing values? Any columns with suspicious data?
-2. **Distributions** — What does a typical row look like? Are there outliers?
-3. **Relationships** — Do any variables seem connected to each other?
-4. **Column deep-dive** — Pick a specific column and really understand it
-5. **Something you noticed** — Tell me what caught your eye
+1. **Project planning** — Create a personalized project plan with milestones and a learning path
+2. **Data quality** — Are there missing values? Any columns with suspicious data?
+3. **Distributions** — What does a typical row look like? Are there outliers?
+4. **Relationships** — Do any variables seem connected to each other?
+5. **Column deep-dive** — Pick a specific column and really understand it
+6. **Something you noticed** — Tell me what caught your eye
 
 What sounds most interesting to you?"
 
@@ -84,8 +86,9 @@ questions to help you think like a data analyst."
 ## When a student returns and a dataset already exists
 If the conversation restarts (e.g. the web page is refreshed) and you know
 there's a previously uploaded file, proactively mention that you still have
-the data stored and can continue immediately.  This reminder helps avoid
-unnecessary re-uploads.## Teaching tone
+the data stored and can continue immediately. Then present the same numbered
+options menu (starting with project planning) so they can choose what to do next.
+This reminder helps avoid unnecessary re-uploads.## Teaching tone
 - Ask one question at a time — don't overwhelm
 - Celebrate good observations, even partial ones
 - When a student is stuck, give a small hint, not the full answer
@@ -99,10 +102,37 @@ decisions, outlier counts, and correlation data. Use this ONLY to:
 - Know when a student's claim is wrong so you can guide them correctly
 - Know which topics are worth exploring (e.g. if there's a strong correlation,
   steer the student toward discovering it)
-- Avoid misleading the student with wrong hints"""
+- Avoid misleading the student with wrong hints
+
+## Routing to the Project Planner
+You are the orchestrator. When a student asks about **planning**, **project plans**,
+**learning paths**, **timelines**, **scheduling**, or **how to structure their project**,
+you MUST delegate to the planner by calling the `start_planning` tool.
+
+Examples of planning requests:
+- "Can you help me plan my project?"
+- "I need a study plan"
+- "How should I schedule my analysis work?"
+- "What steps should I follow for my project?"
+- "Help me create a timeline"
+- "I want to plan my data analysis project"
+
+When routing to the planner:
+1. Call `start_planning` with the student's message
+2. IMPORTANT: Copy the planner's FULL response into your reply VERBATIM — do NOT
+   summarize, paraphrase, or omit any part of it. The planner's response contains
+   questions for the student; if you don't include them word-for-word, the student
+   will never see them. Do NOT add your own commentary around the planner's response.
+   Just output exactly what the planner said.
+3. After you call `start_planning`, the student's follow-up messages will go
+   DIRECTLY to the planner (they won't come through you). The planner will
+   automatically route the student back to you if they ask a non-planning question.
+4. If the student switches back to data analysis questions, handle those yourself
+   with your normal tools — do NOT send data analysis questions to the planner"""
 
 
-def create_tutor(username: str, prior_messages: list | None = None) -> Agent:
+def create_tutor(username: str, prior_messages: list | None = None,
+                  routing_state: dict | None = None) -> Agent:
     """
     Create a Socratic tutor agent for a specific student.
 
@@ -112,8 +142,20 @@ def create_tutor(username: str, prior_messages: list | None = None) -> Agent:
                         (list of {"role": str, "content": str} dicts).
                         Pass these to restore conversation context across
                         stateless HTTP requests.
+        routing_state: Mutable dict for signalling routing decisions back to
+                       the handler.  When start_planning is called, we set
+                       routing_state["switch_to"] = "planner" and store the
+                       planner's messages so the handler can persist them.
     """
     from strands import tool as strands_tool
+
+    # Cache the raw CSV so we only download from S3 once per session
+    _csv_cache: dict = {"raw": None}
+
+    def _get_csv() -> str:
+        if _csv_cache["raw"] is None:
+            _csv_cache["raw"] = _download_csv(username)
+        return _csv_cache["raw"]
 
     @strands_tool
     def run_analysis() -> str:
@@ -124,8 +166,7 @@ def create_tutor(username: str, prior_messages: list | None = None) -> Agent:
         the student. Use this as the default when the student asks about
         analysis, profiling, or data exploration — NOT during upload.
         """
-        csv_content = _download_csv(username)
-        return _analyze_dataset(user_id=username, csv_content=csv_content)
+        return _analyze_dataset(user_id=username, csv_content=_get_csv())
 
     @strands_tool
     def run_smart_analysis() -> str:
@@ -136,8 +177,7 @@ def create_tutor(username: str, prior_messages: list | None = None) -> Agent:
         run_analysis when you want a targeted, context-aware analysis rather than
         running every step. Results are stored privately for tutor use only.
         """
-        csv_content = _download_csv(username)
-        return _smart_analyze_dataset(user_id=username, csv_content=csv_content)
+        return _smart_analyze_dataset(user_id=username, csv_content=_get_csv())
 
     @strands_tool
     def check_claim(student_claim: str) -> str:
@@ -162,6 +202,88 @@ def create_tutor(username: str, prior_messages: list | None = None) -> Agent:
         """Check whether this student has already uploaded a dataset."""
         return "yes" if dataset_exists(username) else "no"
 
+    # ── Planner sub-agent state (persists across tool calls within one session)
+    _planner_state: dict = {"agent": None}
+
+    @strands_tool
+    def start_planning(student_message: str) -> str:
+        """
+        Delegate to the project-planner sub-agent. Call this whenever the
+        student asks about project planning, timelines, learning paths, or
+        how to structure their work. The planner will interview the student
+        and create a personalised project plan and learning path.
+
+        Args:
+            student_message: The student's message about planning.
+        """
+        if _planner_state["agent"] is None:
+            planner = create_planner(username)
+
+            # Build system context about what we already know
+            system_hints = []
+
+            # Check for existing dataset
+            has_data = dataset_exists(username)
+            if has_data:
+                analysis_summary = ""
+                try:
+                    analysis_summary = _get_analysis(username)
+                except Exception:
+                    pass
+                if analysis_summary:
+                    system_hints.append(
+                        "This student already has a dataset uploaded and analyzed. "
+                        f"Here is a summary of their data:\n{analysis_summary}\n"
+                        "Use this context to tailor the plan — do NOT ask them "
+                        "to find or upload data. Instead, ask what they want to "
+                        "achieve or explore with this dataset."
+                    )
+                else:
+                    system_hints.append(
+                        "This student already has a dataset uploaded but it has "
+                        "not been analyzed yet. They have data — do NOT ask them "
+                        "to find data. Ask what they want to achieve with it."
+                    )
+            else:
+                system_hints.append(
+                    "This student does NOT have a dataset yet. Help them figure "
+                    "out a topic and where to find relevant data."
+                )
+
+            # Check for existing saved plan
+            existing_plan = ""
+            try:
+                existing_plan = _get_plan(username)
+            except Exception:
+                pass
+            if existing_plan:
+                system_hints.append(
+                    "This student has a previously saved project plan. "
+                    "Call recall_plan to retrieve it, then summarize what you "
+                    "remember and ask if they want to continue with that plan "
+                    "or start a new one."
+                )
+
+            if system_hints:
+                hint_block = " ".join(system_hints)
+                prompt = f"[SYSTEM: {hint_block}]\n\nStudent says: {student_message}"
+            else:
+                prompt = student_message
+
+            response = planner(prompt)
+            _planner_state["agent"] = planner
+        else:
+            response = _planner_state["agent"](student_message)
+
+        # Signal routing to planner for subsequent messages
+        if routing_state is not None:
+            routing_state["switch_to"] = "planner"
+            routing_state["planner_messages"] = list(
+                _planner_state["agent"].messages
+            )
+
+        return str(response)
+
     agent = Agent(
         model=BedrockModel(
             model_id="us.anthropic.claude-sonnet-4-6",
@@ -169,7 +291,7 @@ def create_tutor(username: str, prior_messages: list | None = None) -> Agent:
             boto_client_config=_BOTO_CONFIG,
         ),
         system_prompt=_SYSTEM_PROMPT,
-        tools=[run_analysis, run_smart_analysis, check_claim, recall_dataset, has_dataset],
+        tools=[run_analysis, run_smart_analysis, check_claim, recall_dataset, has_dataset, start_planning],
     )
 
     # Restore prior conversation turns so the agent has context across
